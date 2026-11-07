@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: wire-service
+server:
+  port: 8083
