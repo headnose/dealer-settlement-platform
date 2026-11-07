@@ -25,5 +25,6 @@
         <module>loan-service</module>
         <module>settlement-service</module>
         <module>wire-service</module>
+        <module>notification-service</module>
     </modules>
 </project>
