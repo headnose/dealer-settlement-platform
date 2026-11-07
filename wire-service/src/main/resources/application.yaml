@@ -1,5 +1,14 @@
 spring:
   application:
     name: wire-service
+  datasource:
+    url: jdbc:mysql://localhost:3306/wire_db
+    username: dsp
+    password: dsp
+  jpa:
+    hibernate:
+      ddl-auto: validate    # Flyway creates tables; Hibernate only checks they match your entities
+    open-in-view: false     # don't keep DB connections open during the web response
+
 server:
   port: 8083

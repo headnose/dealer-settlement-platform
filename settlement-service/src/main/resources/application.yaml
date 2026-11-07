@@ -1,5 +1,8 @@
 spring:
   application:
     name: settlement-service
+  mongodb:
+    uri: mongodb://localhost:27017/settlement_db
+
 server:
   port: 8082
