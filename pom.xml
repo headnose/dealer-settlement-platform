@@ -23,5 +23,6 @@
 
     <modules>
         <module>loan-service</module>
+        <module>settlement-service</module>
     </modules>
 </project>

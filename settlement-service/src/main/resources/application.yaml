@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: settlement-service
+server:
+  port: 8082
