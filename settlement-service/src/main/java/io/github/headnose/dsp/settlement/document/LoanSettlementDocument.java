@@ -1,4 +1,5 @@
 package io.github.headnose.dsp.settlement.document;
+import java.util.Objects;
 
 import io.github.headnose.dsp.settlement.model.Adjustment;
 import io.github.headnose.dsp.settlement.model.LoanInfo;
@@ -49,10 +50,24 @@ public class LoanSettlementDocument {
         return doc;
     }
 
+    /**
+     * Records the result of a settlement calculation and marks the loan CALCULATED.
+     * Replaces any previous adjustments: PATCH means "replace", so recalculating
+     * with the same input gives the same result (idempotent).
+     */
+    public void applySettlement(PaymentInfo payment,
+                                List<Adjustment> adjustments,
+                                SettlementInfo settlement) {
+        this.payment = Objects.requireNonNull(payment, "payment");
+        this.adjustments = List.copyOf(Objects.requireNonNull(adjustments, "adjustments"));
+        this.settlement = Objects.requireNonNull(settlement, "settlement");
+        this.status = SettlementStatus.CALCULATED;
+    }
+
     public String getLoanId() { return loanId; }
     public LoanInfo getLoan() { return loan; }
     public SettlementStatus getStatus() { return status; }
-    public List<Adjustment> getAdjustments() { return adjustments; }
+    public List<Adjustment> getAdjustments() { return List.copyOf(adjustments); }
     public PaymentInfo getPayment() { return payment; }
     public SettlementInfo getSettlement() { return settlement; }
     public Long getVersion() { return version; }
