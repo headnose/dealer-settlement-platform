@@ -15,6 +15,7 @@ import org.springframework.data.mongodb.core.mapping.Document;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 @Document(collection = "loan_settlements")
 public class LoanSettlementDocument {
@@ -58,9 +59,15 @@ public class LoanSettlementDocument {
     public void applySettlement(PaymentInfo payment,
                                 List<Adjustment> adjustments,
                                 SettlementInfo settlement) {
+        Objects.requireNonNull(settlement, "settlement");
+        // Recalculation keeps the existing ID; the first calculation gets a new one
+        String settlementId = (this.settlement != null && this.settlement.settlementId() != null)
+                ? this.settlement.settlementId()
+                : "SET-" + UUID.randomUUID();
+
         this.payment = Objects.requireNonNull(payment, "payment");
         this.adjustments = List.copyOf(Objects.requireNonNull(adjustments, "adjustments"));
-        this.settlement = Objects.requireNonNull(settlement, "settlement");
+        this.settlement = settlement.withSettlementId(settlementId);
         this.status = SettlementStatus.CALCULATED;
     }
 

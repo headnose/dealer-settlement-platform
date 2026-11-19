@@ -1,8 +1,8 @@
 package io.github.headnose.dsp.settlement.service;
 
-import io.github.headnose.dsp.settlement.controller.dto.AdjustmentRequest;
-import io.github.headnose.dsp.settlement.controller.dto.PaymentRequest;
-import io.github.headnose.dsp.settlement.controller.dto.SettlementRequest;
+import io.github.headnose.dsp.settlement.controller.dto.AdjustmentDto;
+import io.github.headnose.dsp.settlement.controller.dto.PaymentDto;
+import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
 import io.github.headnose.dsp.settlement.model.PaymentInfo;
@@ -53,12 +53,12 @@ class SettlementServiceTest {
 
     // ---------- helpers ----------
 
-    private static SettlementRequest request(String currency, AdjustmentRequest... adjustments) {
-        return new SettlementRequest(new PaymentRequest(PaymentMethod.WIRE, currency), List.of(adjustments));
+    private static SettlementRequestDto request(String currency, AdjustmentDto... adjustments) {
+        return new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, currency, null, null), List.of(adjustments));
     }
 
-    private static AdjustmentRequest adjReq(AdjustmentType type, String amount) {
-        return new AdjustmentRequest(type, new BigDecimal(amount));
+    private static AdjustmentDto adjReq(AdjustmentType type, String amount) {
+        return new AdjustmentDto(type, new BigDecimal(amount));
     }
 
     private void givenImportedLoan() {
@@ -83,8 +83,9 @@ class SettlementServiceTest {
                 adjReq(AdjustmentType.DOC_FEE, "150.00")));
 
         assertThat(result.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
-        assertThat(result.getSettlement()).isEqualTo(settlement("28500.00", "650.00", "27850.00"));
-        assertThat(result.getAdjustments()).containsExactly(
+        assertThat(result.getSettlement())
+                .usingRecursiveComparison().ignoringFields("settlementId")
+                .isEqualTo(settlement("28500.00", "650.00", "27850.00"));        assertThat(result.getAdjustments()).containsExactly(
                 adj(AdjustmentType.DEALER_HOLDBACK, "500.00"),
                 adj(AdjustmentType.DOC_FEE, "150.00"));
         assertThat(result.getPayment()).isEqualTo(new PaymentInfo(

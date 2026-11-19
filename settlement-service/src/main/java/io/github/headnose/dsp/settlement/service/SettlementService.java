@@ -1,8 +1,8 @@
 package io.github.headnose.dsp.settlement.service;
 
-import io.github.headnose.dsp.settlement.controller.dto.AdjustmentRequest;
-import io.github.headnose.dsp.settlement.controller.dto.PaymentRequest;
-import io.github.headnose.dsp.settlement.controller.dto.SettlementRequest;
+import io.github.headnose.dsp.settlement.controller.dto.AdjustmentDto;
+import io.github.headnose.dsp.settlement.controller.dto.PaymentDto;
+import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.Adjustment;
 import io.github.headnose.dsp.settlement.model.LoanInfo;
@@ -38,7 +38,7 @@ public class SettlementService {
      * @throws org.springframework.dao.OptimisticLockingFailureException
      *         if another request updated the loan at the same time (409)
      */
-    public LoanSettlementDocument calculate(String loanId, SettlementRequest request) {
+    public LoanSettlementDocument calculate(String loanId, SettlementRequestDto request) {
         LoanSettlementDocument doc = repository.findById(loanId)
                 .orElseThrow(() -> new LoanNotImportedException(loanId));
 
@@ -46,7 +46,7 @@ public class SettlementService {
         checkCurrencyMatchesLoan(loan, request.payment());
 
         List<Adjustment> adjustments = request.adjustments().stream()
-                .map(AdjustmentRequest::toAdjustment)
+                .map(AdjustmentDto::toAdjustment)
                 .toList();
 
         SettlementInfo settlement = calculator.calculate(loan.principalAmount(), adjustments);
@@ -62,7 +62,7 @@ public class SettlementService {
     }
 
     /** Rule 6: the payment currency must match the loan currency (no FX conversion). */
-    private static void checkCurrencyMatchesLoan(LoanInfo loan, PaymentRequest payment) {
+    private static void checkCurrencyMatchesLoan(LoanInfo loan, PaymentDto payment) {
         if (!payment.currency().equals(loan.currency())) {
             throw new SettlementRuleViolationException(
                     "Payment currency " + payment.currency()

@@ -8,7 +8,7 @@ import jakarta.validation.constraints.Positive;
 
 import java.math.BigDecimal;
 
-public record AdjustmentRequest(
+public record AdjustmentDto(
         @NotNull AdjustmentType adjustmentType,
         @NotNull @Positive @Digits(integer = 13, fraction = 2) BigDecimal amount
 ) {

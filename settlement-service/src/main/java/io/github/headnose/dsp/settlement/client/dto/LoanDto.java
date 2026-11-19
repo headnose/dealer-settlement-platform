@@ -7,9 +7,9 @@ import io.github.headnose.dsp.settlement.model.LoanStatus;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 
-public record LoanResponse(
+public record LoanDto(
         String loanId,
-        DealerResponse dealer,
+        DealerDto dealer,
         LoanStatus status,
         String currency,
         BigDecimal principalAmount,

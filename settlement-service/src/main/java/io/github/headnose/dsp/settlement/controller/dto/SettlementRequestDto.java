@@ -6,7 +6,7 @@ import jakarta.validation.constraints.Size;
 
 import java.util.List;
 
-public record SettlementRequest(
-        @NotNull @Valid PaymentRequest payment,
-        @NotNull @Size(max = 20) List<@NotNull @Valid AdjustmentRequest> adjustments
+public record SettlementRequestDto(
+        @NotNull @Valid PaymentDto payment,
+        @NotNull @Size(max = 20) List<@NotNull @Valid AdjustmentDto> adjustments
 ) {}

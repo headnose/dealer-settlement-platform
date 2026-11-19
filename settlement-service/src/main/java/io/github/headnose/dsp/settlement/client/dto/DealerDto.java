@@ -1,6 +1,6 @@
 package io.github.headnose.dsp.settlement.client.dto;
 
-public record DealerResponse(
+public record DealerDto(
         String dealerId,
         String dealerName,
         String dealerBankName,

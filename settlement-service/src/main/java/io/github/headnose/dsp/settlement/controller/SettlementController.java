@@ -1,7 +1,7 @@
 package io.github.headnose.dsp.settlement.controller;
 
-import io.github.headnose.dsp.settlement.controller.dto.SettlementRequest;
-import io.github.headnose.dsp.settlement.controller.dto.SettlementResponse;
+import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
+import io.github.headnose.dsp.settlement.controller.dto.SettlementDto;
 import io.github.headnose.dsp.settlement.service.SettlementService;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -22,8 +22,8 @@ public class SettlementController {
 
     /** Calculates (or recalculates) the settlement. Replaces all adjustments. */
     @PatchMapping
-    public SettlementResponse calculate(@PathVariable String loanId,
-                                        @Valid @RequestBody SettlementRequest request) {
-        return SettlementResponse.from(settlementService.calculate(loanId, request));
+    public SettlementDto calculate(@PathVariable String loanId,
+                                   @Valid @RequestBody SettlementRequestDto request) {
+        return SettlementDto.from(settlementService.calculate(loanId, request));
     }
 }

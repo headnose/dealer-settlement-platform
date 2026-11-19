@@ -1,7 +1,7 @@
 package io.github.headnose.dsp.settlement.service;
 
 import io.github.headnose.dsp.settlement.client.LoanServiceClient;
-import io.github.headnose.dsp.settlement.client.dto.LoanResponse;
+import io.github.headnose.dsp.settlement.client.dto.LoanDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.LoanStatus;
 import io.github.headnose.dsp.settlement.repository.LoanSettlementRepository;
@@ -53,12 +53,12 @@ public class LoanImportService {
         }
 
         // Rule 2: does loan-service know this loan?
-        Optional<LoanResponse> response = loanServiceClient.getLoan(loanId);
+        Optional<LoanDto> response = loanServiceClient.getLoan(loanId);
         if (response.isEmpty()) {
             return new ImportResult(loanId, ImportOutcome.NOT_FOUND,
                     "Loan not found in loan-service");
         }
-        LoanResponse loan = response.get();
+        LoanDto loan = response.get();
 
         // Rule 3: only CLOSED loans can be settled
         if (loan.status() != LoanStatus.CLOSED) {

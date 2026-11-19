@@ -45,6 +45,6 @@ public final class SettlementTestData {
     }
 
     public static SettlementInfo settlement(String gross, String total, String net) {
-        return new SettlementInfo(money(gross), money(total), money(net));
+        return new SettlementInfo(null, money(gross), money(total), money(net));
     }
 }

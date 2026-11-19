@@ -6,20 +6,20 @@ import io.github.headnose.dsp.settlement.model.SettlementStatus;
 
 import java.math.BigDecimal;
 
-public record SettlementResponse(
-        String loanId,
-        SettlementStatus status,
+public record SettlementDto(
+        String settlementId,
         BigDecimal grossAmount,
         BigDecimal totalAdjustment,
-        BigDecimal netSettlement
+        BigDecimal netSettlement,
+        SettlementStatus status
 ) {
-    public static SettlementResponse from(LoanSettlementDocument doc) {
+    public static SettlementDto from(LoanSettlementDocument doc) {
         SettlementInfo s = doc.getSettlement();
-        return new SettlementResponse(
-                doc.getLoanId(),
-                doc.getStatus(),
+        return new SettlementDto(
+                s.settlementId(),
                 s.grossAmount(),
                 s.totalAdjustment(),
-                s.netSettlement());
+                s.netSettlement(),
+                doc.getStatus());
     }
 }
