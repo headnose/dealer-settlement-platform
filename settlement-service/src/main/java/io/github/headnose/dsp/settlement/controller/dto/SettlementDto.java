@@ -6,16 +6,16 @@ import io.github.headnose.dsp.settlement.model.SettlementStatus;
 
 import java.math.BigDecimal;
 
-public record SettlementResponse(
+public record SettlementDto(
         String loanId,
         SettlementStatus status,
         BigDecimal grossAmount,
         BigDecimal totalAdjustment,
         BigDecimal netSettlement
 ) {
-    public static SettlementResponse from(LoanSettlementDocument doc) {
+    public static SettlementDto from(LoanSettlementDocument doc) {
         SettlementInfo s = doc.getSettlement();
-        return new SettlementResponse(
+        return new SettlementDto(
                 doc.getLoanId(),
                 doc.getStatus(),
                 s.grossAmount(),

@@ -1,6 +1,6 @@
 package io.github.headnose.dsp.settlement.client;
 
-import io.github.headnose.dsp.settlement.client.dto.LoanResponse;
+import io.github.headnose.dsp.settlement.client.dto.LoanDto;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
@@ -20,12 +20,12 @@ public class LoanServiceClient {
     }
 
     /** Returns the loan, or empty if loan-service answers 404. Other errors are thrown. */
-    public Optional<LoanResponse> getLoan(String loanId) {
+    public Optional<LoanDto> getLoan(String loanId) {
         try {
-            LoanResponse loan = restClient.get()
+            LoanDto loan = restClient.get()
                     .uri("/api/v1/loans/{loanId}", loanId)
                     .retrieve()
-                    .body(LoanResponse.class);
+                    .body(LoanDto.class);
             return Optional.ofNullable(loan);
         } catch (HttpClientErrorException.NotFound e) {
             return Optional.empty();

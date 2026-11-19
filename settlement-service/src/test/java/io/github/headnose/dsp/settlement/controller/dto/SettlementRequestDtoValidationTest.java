@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class SettlementRequestValidationTest {
+class SettlementRequestDtoValidationTest {
 
     private static ValidatorFactory factory;
     private static Validator validator;
@@ -37,17 +37,17 @@ class SettlementRequestValidationTest {
 
     // ---------- helpers ----------
 
-    private static PaymentRequest usdWire() {
-        return new PaymentRequest(PaymentMethod.WIRE, "USD");
+    private static PaymentDto usdWire() {
+        return new PaymentDto(PaymentMethod.WIRE, "USD");
     }
 
-    private static AdjustmentRequest docFee(String amount) {
-        return new AdjustmentRequest(AdjustmentType.DOC_FEE, new BigDecimal(amount));
+    private static AdjustmentDto docFee(String amount) {
+        return new AdjustmentDto(AdjustmentType.DOC_FEE, new BigDecimal(amount));
     }
 
     /** Returns the paths of the fields that failed, e.g. "adjustments[0].amount". */
-    private static Set<String> violatedPaths(SettlementRequest request) {
-        Set<ConstraintViolation<SettlementRequest>> violations = validator.validate(request);
+    private static Set<String> violatedPaths(SettlementRequestDto request) {
+        Set<ConstraintViolation<SettlementRequestDto>> violations = validator.validate(request);
         return violations.stream()
                 .map(v -> v.getPropertyPath().toString())
                 .collect(Collectors.toSet());
@@ -57,37 +57,37 @@ class SettlementRequestValidationTest {
 
     @Test
     void validRequestHasNoViolations() {
-        var request = new SettlementRequest(usdWire(),
+        var request = new SettlementRequestDto(usdWire(),
                 List.of(docFee("150.00"),
-                        new AdjustmentRequest(AdjustmentType.DEALER_HOLDBACK, new BigDecimal("500.00"))));
+                        new AdjustmentDto(AdjustmentType.DEALER_HOLDBACK, new BigDecimal("500.00"))));
 
         assertThat(violatedPaths(request)).isEmpty();
     }
 
     @Test
     void emptyAdjustmentListIsValid() {
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), List.of()))).isEmpty();
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), List.of()))).isEmpty();
     }
 
     // ---------- top-level fields ----------
 
     @Test
     void paymentIsRequired() {
-        assertThat(violatedPaths(new SettlementRequest(null, List.of())))
+        assertThat(violatedPaths(new SettlementRequestDto(null, List.of())))
                 .containsExactly("payment");
     }
 
     @Test
     void adjustmentsListIsRequired() {
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), null)))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), null)))
                 .containsExactly("adjustments");
     }
 
     @Test
     void moreThanTwentyAdjustmentsIsRejected() {
-        List<AdjustmentRequest> many = new ArrayList<>(Collections.nCopies(21, docFee("1.00")));
+        List<AdjustmentDto> many = new ArrayList<>(Collections.nCopies(21, docFee("1.00")));
 
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), many)))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), many)))
                 .containsExactly("adjustments");
     }
 
@@ -95,16 +95,16 @@ class SettlementRequestValidationTest {
 
     @Test
     void paymentMethodIsRequired() {
-        var request = new SettlementRequest(new PaymentRequest(null, "USD"), List.of());
+        var request = new SettlementRequestDto(new PaymentDto(null, "USD"), List.of());
 
         assertThat(violatedPaths(request)).containsExactly("payment.paymentMethod");
     }
 
     @Test
     void currencyMustBeThreeUppercaseLetters() {
-        assertThat(violatedPaths(new SettlementRequest(new PaymentRequest(PaymentMethod.WIRE, "usd"), List.of())))
+        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "usd"), List.of())))
                 .containsExactly("payment.currency");
-        assertThat(violatedPaths(new SettlementRequest(new PaymentRequest(PaymentMethod.WIRE, "US"), List.of())))
+        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "US"), List.of())))
                 .containsExactly("payment.currency");
     }
 
@@ -112,19 +112,19 @@ class SettlementRequestValidationTest {
 
     @Test
     void zeroAmountIsRejected() {
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), List.of(docFee("0.00")))))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), List.of(docFee("0.00")))))
                 .containsExactly("adjustments[0].amount");
     }
 
     @Test
     void negativeAmountIsRejected() {
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), List.of(docFee("-50.00")))))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), List.of(docFee("-50.00")))))
                 .containsExactly("adjustments[0].amount");
     }
 
     @Test
     void moreThanTwoMeaningfulDecimalsIsRejected() {
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), List.of(docFee("10.005")))))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), List.of(docFee("10.005")))))
                 .containsExactly("adjustments[0].amount");
     }
 
@@ -133,26 +133,26 @@ class SettlementRequestValidationTest {
         // @Digits counts the scale as written (10.500 has scale 3), so it fails here.
         // The calculator is more lenient and strips the zeros first. The API edge being
         // stricter than the domain is safe: nothing invalid gets through.
-        var request = new SettlementRequest(usdWire(), List.of(docFee("10.500")));
+        var request = new SettlementRequestDto(usdWire(), List.of(docFee("10.500")));
 
         assertThat(violatedPaths(request)).containsExactly("adjustments[0].amount");
     }
 
     @Test
     void adjustmentTypeIsRequired() {
-        var request = new SettlementRequest(usdWire(),
-                List.of(new AdjustmentRequest(null, new BigDecimal("10.00"))));
+        var request = new SettlementRequestDto(usdWire(),
+                List.of(new AdjustmentDto(null, new BigDecimal("10.00"))));
 
         assertThat(violatedPaths(request)).containsExactly("adjustments[0].adjustmentType");
     }
 
     @Test
     void nullElementInListIsRejected() {
-        List<AdjustmentRequest> withNull = new ArrayList<>();
+        List<AdjustmentDto> withNull = new ArrayList<>();
         withNull.add(null);
 
         // The exact path text for a list element varies, so we only check it points at index 0
-        assertThat(violatedPaths(new SettlementRequest(usdWire(), withNull)))
+        assertThat(violatedPaths(new SettlementRequestDto(usdWire(), withNull)))
                 .singleElement()
                 .asString()
                 .startsWith("adjustments[0]");

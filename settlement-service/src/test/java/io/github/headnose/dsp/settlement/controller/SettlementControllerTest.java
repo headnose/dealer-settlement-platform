@@ -1,6 +1,7 @@
-package io.github.headnose.dsp.settlement.controller;
+package io.github.headnose.dsp.settlement;
 
-import io.github.headnose.dsp.settlement.controller.dto.SettlementRequest;
+import io.github.headnose.dsp.settlement.controller.SettlementController;
+import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
 import io.github.headnose.dsp.settlement.service.LoanNotImportedException;
@@ -76,7 +77,7 @@ class SettlementControllerTest {
 
     @Test
     void returns200WithCalculatedSettlement() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenReturn(calculatedDocument());
 
         patchSettlement(VALID_BODY)
@@ -91,14 +92,14 @@ class SettlementControllerTest {
 
     @Test
     void passesParsedRequestToService() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenReturn(calculatedDocument());
 
         patchSettlement(VALID_BODY).andExpect(status().isOk());
 
-        ArgumentCaptor<SettlementRequest> captor = ArgumentCaptor.forClass(SettlementRequest.class);
+        ArgumentCaptor<SettlementRequestDto> captor = ArgumentCaptor.forClass(SettlementRequestDto.class);
         verify(settlementService).calculate(eq(LOAN_ID), captor.capture());
-        SettlementRequest sent = captor.getValue();
+        SettlementRequestDto sent = captor.getValue();
         assertThat(sent.payment().currency()).isEqualTo("USD");
         assertThat(sent.adjustments()).hasSize(2);
         assertThat(sent.adjustments().get(0).adjustmentType()).isEqualTo(AdjustmentType.DEALER_HOLDBACK);
@@ -139,7 +140,7 @@ class SettlementControllerTest {
 
     @Test
     void returns404WhenLoanNotImported() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenThrow(new LoanNotImportedException(LOAN_ID));
 
         patchSettlement(VALID_BODY)
@@ -151,7 +152,7 @@ class SettlementControllerTest {
 
     @Test
     void returns422WhenBusinessRuleIsViolated() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenThrow(new SettlementRuleViolationException(
                         "Payment currency CAD does not match loan currency USD"));
 
@@ -163,7 +164,7 @@ class SettlementControllerTest {
 
     @Test
     void returns409OnConcurrentUpdate() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenThrow(new OptimisticLockingFailureException("version mismatch"));
 
         patchSettlement(VALID_BODY)
@@ -175,7 +176,7 @@ class SettlementControllerTest {
 
     @Test
     void returns500WithoutLeakingInternals() throws Exception {
-        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequest.class)))
+        when(settlementService.calculate(eq(LOAN_ID), any(SettlementRequestDto.class)))
                 .thenThrow(new IllegalStateException("secret internal detail"));
 
         patchSettlement(VALID_BODY)
