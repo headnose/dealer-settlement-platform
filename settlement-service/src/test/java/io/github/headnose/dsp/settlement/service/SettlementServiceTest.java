@@ -83,8 +83,9 @@ class SettlementServiceTest {
                 adjReq(AdjustmentType.DOC_FEE, "150.00")));
 
         assertThat(result.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
-        assertThat(result.getSettlement()).isEqualTo(settlement("28500.00", "650.00", "27850.00"));
-        assertThat(result.getAdjustments()).containsExactly(
+        assertThat(result.getSettlement())
+                .usingRecursiveComparison().ignoringFields("settlementId")
+                .isEqualTo(settlement("28500.00", "650.00", "27850.00"));        assertThat(result.getAdjustments()).containsExactly(
                 adj(AdjustmentType.DEALER_HOLDBACK, "500.00"),
                 adj(AdjustmentType.DOC_FEE, "150.00"));
         assertThat(result.getPayment()).isEqualTo(new PaymentInfo(

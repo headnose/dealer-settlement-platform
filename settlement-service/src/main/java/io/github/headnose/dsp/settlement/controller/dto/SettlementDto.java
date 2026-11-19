@@ -7,19 +7,19 @@ import io.github.headnose.dsp.settlement.model.SettlementStatus;
 import java.math.BigDecimal;
 
 public record SettlementDto(
-        String loanId,
-        SettlementStatus status,
+        String settlementId,
         BigDecimal grossAmount,
         BigDecimal totalAdjustment,
-        BigDecimal netSettlement
+        BigDecimal netSettlement,
+        SettlementStatus status
 ) {
     public static SettlementDto from(LoanSettlementDocument doc) {
         SettlementInfo s = doc.getSettlement();
         return new SettlementDto(
-                doc.getLoanId(),
-                doc.getStatus(),
+                s.settlementId(),
                 s.grossAmount(),
                 s.totalAdjustment(),
-                s.netSettlement());
+                s.netSettlement(),
+                doc.getStatus());
     }
 }

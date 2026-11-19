@@ -82,8 +82,10 @@ curl -X PATCH http://localhost:8082/api/v1/loans/LN-1001/settlements \
 ```
 
 ```json
-{"loanId": "LN-1001", "status": "CALCULATED", "grossAmount": 28500.00, "totalAdjustment": 650.00, "netSettlement": 27850.00}
+{"settlementId": "SET-…", "grossAmount": 28500.00, "totalAdjustment": 650.00, "netSettlement": 27850.00, "status": "CALCULATED"}
 ```
+
+Business rules:
 
 Business rules:
 

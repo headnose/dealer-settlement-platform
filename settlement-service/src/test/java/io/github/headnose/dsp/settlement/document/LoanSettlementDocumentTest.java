@@ -25,7 +25,9 @@ class LoanSettlementDocumentTest {
 
         assertThat(doc.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
         assertThat(doc.getPayment()).isEqualTo(wirePayment());
-        assertThat(doc.getSettlement()).isEqualTo(settlement("28500.00", "650.00", "27850.00"));
+        assertThat(doc.getSettlement())
+                .usingRecursiveComparison().ignoringFields("settlementId")
+                .isEqualTo(settlement("28500.00", "650.00", "27850.00"));
         assertThat(doc.getAdjustments()).hasSize(2);
     }
 
@@ -65,5 +67,27 @@ class LoanSettlementDocumentTest {
 
         assertThatThrownBy(() -> doc.getAdjustments().add(adj(AdjustmentType.OTHER, "1.00")))
                 .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void firstCalculationAssignsSettlementId() {
+        LoanSettlementDocument doc = LoanSettlementDocument.imported(closedLoan());
+
+        doc.applySettlement(wirePayment(), List.of(), settlement("28500.00", "0.00", "28500.00"));
+
+        assertThat(doc.getSettlement().settlementId()).startsWith("SET-");
+    }
+
+    @Test
+    void recalculationKeepsSameSettlementId() {
+        LoanSettlementDocument doc = LoanSettlementDocument.imported(closedLoan());
+        doc.applySettlement(wirePayment(), List.of(), settlement("28500.00", "0.00", "28500.00"));
+        String firstId = doc.getSettlement().settlementId();
+
+        doc.applySettlement(wirePayment(),
+                List.of(adj(AdjustmentType.DOC_FEE, "150.00")),
+                settlement("28500.00", "150.00", "28350.00"));
+
+        assertThat(doc.getSettlement().settlementId()).isEqualTo(firstId);
     }
 }

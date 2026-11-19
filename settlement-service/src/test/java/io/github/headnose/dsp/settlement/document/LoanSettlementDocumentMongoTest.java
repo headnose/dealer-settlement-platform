@@ -43,6 +43,7 @@ class LoanSettlementDocumentMongoTest {
         assertThat(reloaded.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
         assertThat(reloaded.getPayment().paymentMethod()).isEqualTo(PaymentMethod.WIRE);        assertThat(reloaded.getPayment().beneficiaryBank()).isEqualTo("Sunrise Auto Group Bank");
         assertThat(reloaded.getSettlement())
+                .usingRecursiveComparison().ignoringFields("settlementId")
                 .isEqualTo(settlement("28500.00", "650.00", "27850.00"));
         assertThat(reloaded.getAdjustments()).containsExactly(
                 adj(AdjustmentType.DEALER_HOLDBACK, "500.00"),
@@ -62,6 +63,7 @@ class LoanSettlementDocumentMongoTest {
         assertThat(settlement.get("grossAmount")).isInstanceOf(Decimal128.class);
         assertThat(settlement.get("totalAdjustment")).isInstanceOf(Decimal128.class);
         assertThat(settlement.get("netSettlement")).isInstanceOf(Decimal128.class);
+        assertThat(settlement.get("settlementId")).isInstanceOf(String.class);
 
         List<Document> adjustments = raw.getList("adjustments", Document.class);
         assertThat(adjustments.get(0).get("amount")).isInstanceOf(Decimal128.class);

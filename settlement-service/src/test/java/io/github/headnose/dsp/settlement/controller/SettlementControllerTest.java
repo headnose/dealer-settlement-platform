@@ -23,9 +23,7 @@ import java.util.List;
 
 import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.hamcrest.Matchers.containsInAnyOrder;
-import static org.hamcrest.Matchers.containsString;
-import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -82,7 +80,8 @@ class SettlementControllerTest {
         patchSettlement(VALID_BODY)
                 .andExpect(status().isOk())
                 .andExpect(content().contentType(MediaType.APPLICATION_JSON))
-                .andExpect(jsonPath("$.loanId").value(LOAN_ID))
+                .andExpect(jsonPath("$.settlementId").value(startsWith("SET-")))
+                .andExpect(jsonPath("$.loanId").doesNotExist())
                 .andExpect(jsonPath("$.status").value("CALCULATED"))
                 // check the raw JSON text so we know the scale (".00") survived
                 .andExpect(content().string(containsString("\"netSettlement\":27850.00")))

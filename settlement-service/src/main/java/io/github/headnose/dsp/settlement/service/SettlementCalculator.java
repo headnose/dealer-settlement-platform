@@ -50,6 +50,7 @@ public class SettlementCalculator {
         }
 
         return new SettlementInfo(
+                null,
                 toMoney(grossAmount),
                 toMoney(totalAdjustment),
                 toMoney(netSettlement));
