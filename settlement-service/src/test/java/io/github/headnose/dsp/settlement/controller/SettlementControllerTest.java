@@ -1,6 +1,5 @@
-package io.github.headnose.dsp.settlement;
+package io.github.headnose.dsp.settlement.controller;
 
-import io.github.headnose.dsp.settlement.controller.SettlementController;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;

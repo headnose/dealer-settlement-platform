@@ -60,17 +60,17 @@ public class SettlementCalculator {
 
         if (amount == null) {
             throw new IllegalArgumentException(
-                    "Adjustment amount is required for " + adjustment.type());
+                    "Adjustment amount is required for " + adjustment.adjustmentType());
         }
         if (amount.signum() <= 0) {
             throw new IllegalArgumentException(
                     "Adjustment amount must be positive: "
-                            + adjustment.type() + " = " + amount.toPlainString());
+                            + adjustment.adjustmentType() + " = " + amount.toPlainString());
         }
         if (amount.stripTrailingZeros().scale() > MONEY_SCALE) {
             throw new IllegalArgumentException(
                     "Adjustment amount has more than " + MONEY_SCALE + " decimal places: "
-                            + adjustment.type() + " = " + amount.toPlainString());
+                            + adjustment.adjustmentType() + " = " + amount.toPlainString());
         }
     }
 

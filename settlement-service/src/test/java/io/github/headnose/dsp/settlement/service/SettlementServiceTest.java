@@ -54,7 +54,7 @@ class SettlementServiceTest {
     // ---------- helpers ----------
 
     private static SettlementRequestDto request(String currency, AdjustmentDto... adjustments) {
-        return new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, currency), List.of(adjustments));
+        return new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, currency, null, null), List.of(adjustments));
     }
 
     private static AdjustmentDto adjReq(AdjustmentType type, String amount) {

@@ -38,7 +38,7 @@ class SettlementRequestDtoValidationTest {
     // ---------- helpers ----------
 
     private static PaymentDto usdWire() {
-        return new PaymentDto(PaymentMethod.WIRE, "USD");
+        return new PaymentDto(PaymentMethod.WIRE, "USD", null, null);
     }
 
     private static AdjustmentDto docFee(String amount) {
@@ -95,16 +95,16 @@ class SettlementRequestDtoValidationTest {
 
     @Test
     void paymentMethodIsRequired() {
-        var request = new SettlementRequestDto(new PaymentDto(null, "USD"), List.of());
+        var request = new SettlementRequestDto(new PaymentDto(null, "USD", null, null), List.of());
 
         assertThat(violatedPaths(request)).containsExactly("payment.paymentMethod");
     }
 
     @Test
     void currencyMustBeThreeUppercaseLetters() {
-        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "usd"), List.of())))
+        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "usd", null, null), List.of())))
                 .containsExactly("payment.currency");
-        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "US"), List.of())))
+        assertThat(violatedPaths(new SettlementRequestDto(new PaymentDto(PaymentMethod.WIRE, "US", null, null), List.of())))
                 .containsExactly("payment.currency");
     }
 
