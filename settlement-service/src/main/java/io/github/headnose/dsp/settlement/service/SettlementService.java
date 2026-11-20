@@ -4,10 +4,7 @@ import io.github.headnose.dsp.settlement.controller.dto.AdjustmentDto;
 import io.github.headnose.dsp.settlement.controller.dto.PaymentDto;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
-import io.github.headnose.dsp.settlement.model.Adjustment;
-import io.github.headnose.dsp.settlement.model.LoanInfo;
-import io.github.headnose.dsp.settlement.model.PaymentInfo;
-import io.github.headnose.dsp.settlement.model.SettlementInfo;
+import io.github.headnose.dsp.settlement.model.*;
 import io.github.headnose.dsp.settlement.repository.LoanSettlementRepository;
 import org.springframework.stereotype.Service;
 
@@ -59,6 +56,16 @@ public class SettlementService {
 
         doc.applySettlement(payment, adjustments, settlement);
         return repository.save(doc);
+    }
+
+    public LoanSettlementDocument getCalculatedSettlement(String loanId) {
+        LoanSettlementDocument doc = repository.findById(loanId)
+                .orElseThrow(() -> new LoanNotImportedException(loanId));
+
+        if (doc.getStatus() != SettlementStatus.CALCULATED) {
+            throw new SettlementNotCalculatedException(loanId);
+        }
+        return doc;
     }
 
     /** Rule 6: the payment currency must match the loan currency (no FX conversion). */

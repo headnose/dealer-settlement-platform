@@ -85,7 +85,8 @@ class SettlementServiceTest {
         assertThat(result.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
         assertThat(result.getSettlement())
                 .usingRecursiveComparison().ignoringFields("settlementId")
-                .isEqualTo(settlement("28500.00", "650.00", "27850.00"));        assertThat(result.getAdjustments()).containsExactly(
+                .isEqualTo(settlement("28500.00", "650.00", "27850.00"));
+        assertThat(result.getAdjustments()).containsExactly(
                 adj(AdjustmentType.DEALER_HOLDBACK, "500.00"),
                 adj(AdjustmentType.DOC_FEE, "150.00"));
         assertThat(result.getPayment()).isEqualTo(new PaymentInfo(
@@ -150,5 +151,37 @@ class SettlementServiceTest {
 
         assertThatThrownBy(() -> service.calculate(LOAN_ID, request("USD")))
                 .isInstanceOf(OptimisticLockingFailureException.class);
+    }
+
+    // ---------- getCalculatedSettlement ----------
+
+    @Test
+    void getCalculatedSettlementReturnsCalculatedDocument() {
+        LoanSettlementDocument calculated = LoanSettlementDocument.imported(closedLoan());
+        calculated.applySettlement(wirePayment(), List.of(), settlement("28500.00", "0.00", "28500.00"));
+        when(repository.findById(LOAN_ID)).thenReturn(Optional.of(calculated));
+
+        LoanSettlementDocument result = service.getCalculatedSettlement(LOAN_ID);
+
+        assertThat(result).isSameAs(calculated);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void getCalculatedSettlementThrowsWhenLoanNotImported() {
+        when(repository.findById(LOAN_ID)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.getCalculatedSettlement(LOAN_ID))
+                .isInstanceOf(LoanNotImportedException.class)
+                .hasMessageContaining(LOAN_ID);
+    }
+
+    @Test
+    void getCalculatedSettlementThrowsWhenNotCalculatedYet() {
+        givenImportedLoan();
+
+        assertThatThrownBy(() -> service.getCalculatedSettlement(LOAN_ID))
+                .isInstanceOf(SettlementNotCalculatedException.class)
+                .hasMessageContaining(LOAN_ID);
     }
 }
