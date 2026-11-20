@@ -1,14 +1,11 @@
 package io.github.headnose.dsp.settlement.controller;
 
+import io.github.headnose.dsp.settlement.controller.dto.SettlementDetailDto;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementDto;
 import io.github.headnose.dsp.settlement.service.SettlementService;
 import jakarta.validation.Valid;
-import org.springframework.web.bind.annotation.PatchMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/v1/loans/{loanId}/settlements")
@@ -25,5 +22,11 @@ public class SettlementController {
     public SettlementDto calculate(@PathVariable String loanId,
                                    @Valid @RequestBody SettlementRequestDto request) {
         return SettlementDto.from(settlementService.calculate(loanId, request));
+    }
+
+    /** Settlement detail for downstream services such as wire-service (blueprint: SettlementDetailDto). */
+    @GetMapping
+    public SettlementDetailDto getSettlement(@PathVariable String loanId) {
+        return SettlementDetailDto.from(settlementService.getCalculatedSettlement(loanId));
     }
 }
