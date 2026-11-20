@@ -1,5 +1,7 @@
 package io.github.headnose.dsp.settlement.document;
 
+import io.github.headnose.dsp.settlement.MongoTestContainerConfig;
+import io.github.headnose.dsp.settlement.config.MongoConfig;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
 import io.github.headnose.dsp.settlement.model.PaymentMethod;
 import io.github.headnose.dsp.settlement.model.SettlementStatus;
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.mongodb.test.autoconfigure.DataMongoTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.mongodb.core.MongoTemplate;
 // ⬇️ copy the @DataMongoTest import line from your existing Mongo test
 // import org.springframework.boot. ... .DataMongoTest;
@@ -20,7 +23,7 @@ import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DataMongoTest
-// ⬆ plus any other class annotations your existing Mongo test has
+@Import({MongoConfig.class, MongoTestContainerConfig.class})
 class LoanSettlementDocumentMongoTest {
 
     @Autowired
@@ -41,7 +44,8 @@ class LoanSettlementDocumentMongoTest {
         LoanSettlementDocument reloaded = repository.findById(LOAN_ID).orElseThrow();
 
         assertThat(reloaded.getStatus()).isEqualTo(SettlementStatus.CALCULATED);
-        assertThat(reloaded.getPayment().paymentMethod()).isEqualTo(PaymentMethod.WIRE);        assertThat(reloaded.getPayment().beneficiaryBank()).isEqualTo("Sunrise Auto Group Bank");
+        assertThat(reloaded.getPayment().paymentMethod()).isEqualTo(PaymentMethod.WIRE);
+        assertThat(reloaded.getPayment().beneficiaryBank()).isEqualTo("Sunrise Auto Group Bank");
         assertThat(reloaded.getSettlement())
                 .usingRecursiveComparison().ignoringFields("settlementId")
                 .isEqualTo(settlement("28500.00", "650.00", "27850.00"));

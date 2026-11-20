@@ -1,12 +1,13 @@
 package io.github.headnose.dsp.settlement.repository;
 
+import io.github.headnose.dsp.settlement.MongoTestContainerConfig;
 import io.github.headnose.dsp.settlement.config.MongoConfig;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.DealerInfo;
 import io.github.headnose.dsp.settlement.model.LoanInfo;
 import io.github.headnose.dsp.settlement.model.LoanStatus;
 import io.github.headnose.dsp.settlement.model.SettlementStatus;
-import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.mongodb.test.autoconfigure.DataMongoTest;
@@ -20,17 +21,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DataMongoTest
-@Import(MongoConfig.class)
-class LoanSettlementRepositoryTest {
+@Import({MongoConfig.class, MongoTestContainerConfig.class})class LoanSettlementRepositoryTest {
 
     private static final String TEST_LOAN_ID = "TEST-LN-1";
 
     @Autowired
     private LoanSettlementRepository repository;
 
-    @AfterEach
-    void cleanUp() {
-        repository.deleteById(TEST_LOAN_ID);
+    @BeforeEach
+    void cleanCollection() {
+        repository.deleteAll();
     }
 
     private LoanInfo sampleLoan() {
@@ -61,7 +61,7 @@ class LoanSettlementRepositoryTest {
 
         assertThat(repository.findByLoanDealerDealerId("D-TEST"))
                 .extracting(LoanSettlementDocument::getLoanId)
-                .contains(TEST_LOAN_ID);
+                .containsExactly(TEST_LOAN_ID);
     }
 
     @Test
