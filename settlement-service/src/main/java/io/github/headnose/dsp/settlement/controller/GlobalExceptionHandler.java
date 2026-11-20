@@ -1,6 +1,7 @@
 package io.github.headnose.dsp.settlement.controller;
 
 import io.github.headnose.dsp.settlement.service.LoanNotImportedException;
+import io.github.headnose.dsp.settlement.service.SettlementNotCalculatedException;
 import io.github.headnose.dsp.settlement.service.SettlementRuleViolationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +35,14 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail handleLoanNotImported(LoanNotImportedException ex) {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
         problem.setTitle("Loan not imported");
+        problem.setProperty("loanId", ex.getLoanId());
+        return problem;
+    }
+
+    @ExceptionHandler(SettlementNotCalculatedException.class)
+    public ProblemDetail handleSettlementNotCalculated(SettlementNotCalculatedException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+        problem.setTitle("Settlement not calculated");
         problem.setProperty("loanId", ex.getLoanId());
         return problem;
     }

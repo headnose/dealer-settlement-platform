@@ -120,6 +120,35 @@ Errors use RFC 9457 Problem Details (`application/problem+json`). Example 400:
 | 422 | Business rule violated (currency mismatch, negative net) |
 | 500 | Unexpected error (details are logged, not returned) |
 
+### Get settlement detail
+
+`GET /api/v1/loans/{loanId}/settlements` returns the calculated settlement for downstream
+services such as wire-service: the settlement amounts, the payment (including the beneficiary
+bank and value date filled in by settlement-service), and the adjustments.
+
+```bash
+curl http://localhost:8082/api/v1/loans/LN-1001/settlements
+```
+
+```json
+{
+  "settlement": {"settlementId": "SET-…", "grossAmount": 28500.00, "totalAdjustment": 650.00, "netSettlement": 27850.00, "status": "CALCULATED"},
+  "payment": {"paymentMethod": "WIRE", "currency": "USD", "beneficiaryBank": "Riverbend Community Bank", "valueDate": "2026-11-23"},
+  "adjustments": [
+    {"adjustmentType": "DEALER_HOLDBACK", "amount": 500.00},
+    {"adjustmentType": "DOC_FEE", "amount": 150.00}
+  ]
+}
+```
+
+| Status | When |
+|---|---|
+| 200 | Settlement is calculated |
+| 404 `Loan not imported` | The loan has not been imported |
+| 404 `Settlement not calculated` | The loan is imported but not calculated yet; retry after calculation |
+
+Both 404 cases return the same status, so clients tell them apart by the Problem Details `title`.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -130,6 +159,8 @@ Errors use RFC 9457 Problem Details (`application/problem+json`). Example 400:
       with per-loan outcomes and idempotent re-import
 - [x] settlement-service: settlement calculation (`PATCH`) with BigDecimal math, Bean Validation,
       business-rule checks, injected `Clock` for value dates, and RFC 9457 error responses
+- [x] settlement-service: settlement detail (`GET`) for wire-service, with distinct 404s for
+    "not imported" and "not calculated"
 
 ## Roadmap
 

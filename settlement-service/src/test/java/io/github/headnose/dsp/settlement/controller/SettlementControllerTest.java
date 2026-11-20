@@ -15,12 +15,8 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
-// ⬇️ copy the @WebMvcTest import line from your loan-service test
-// import org.springframework.boot. ... .WebMvcTest;
-
 import java.math.BigDecimal;
 import java.util.List;
-
 import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -33,6 +29,8 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import io.github.headnose.dsp.settlement.service.SettlementNotCalculatedException;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 @WebMvcTest(SettlementController.class)
 class SettlementControllerTest {
@@ -59,6 +57,10 @@ class SettlementControllerTest {
         return mockMvc.perform(patch(URL, LOAN_ID)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body));
+    }
+
+    private ResultActions getSettlement() throws Exception {
+        return mockMvc.perform(get(URL, LOAN_ID));
     }
 
     private static LoanSettlementDocument calculatedDocument() {
@@ -182,5 +184,51 @@ class SettlementControllerTest {
                 .andExpect(jsonPath("$.detail").value("An unexpected error occurred."))
                 .andExpect(content().string(not(containsString("secret"))))
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
+    }
+
+    // ---------- GET ----------
+
+    @Test
+    void getReturns200WithSettlementDetailInBlueprintShape() throws Exception {
+        when(settlementService.getCalculatedSettlement(LOAN_ID)).thenReturn(calculatedDocument());
+
+        getSettlement()
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.APPLICATION_JSON))
+                .andExpect(jsonPath("$.settlement.settlementId").value(startsWith("SET-")))
+                .andExpect(jsonPath("$.settlement.status").value("CALCULATED"))
+                .andExpect(jsonPath("$.payment.paymentMethod").value("WIRE"))
+                .andExpect(jsonPath("$.payment.currency").value("USD"))
+                .andExpect(jsonPath("$.payment.beneficiaryBank").value("Sunrise Auto Group Bank"))
+                .andExpect(jsonPath("$.payment.valueDate").value("2026-05-11"))
+                .andExpect(jsonPath("$.adjustments", hasSize(2)))
+                .andExpect(jsonPath("$.adjustments[0].adjustmentType").value("DEALER_HOLDBACK"))
+                // raw JSON text, so we know the money scale (".00") survived
+                .andExpect(content().string(containsString("\"netSettlement\":27850.00")))
+                .andExpect(content().string(containsString("\"amount\":500.00")));
+    }
+
+    @Test
+    void getReturns404WhenLoanNotImported() throws Exception {
+        when(settlementService.getCalculatedSettlement(LOAN_ID))
+                .thenThrow(new LoanNotImportedException(LOAN_ID));
+
+        getSettlement()
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Loan not imported"))
+                .andExpect(jsonPath("$.loanId").value(LOAN_ID));
+    }
+
+    @Test
+    void getReturns404WhenSettlementNotCalculated() throws Exception {
+        when(settlementService.getCalculatedSettlement(LOAN_ID))
+                .thenThrow(new SettlementNotCalculatedException(LOAN_ID));
+
+        getSettlement()
+                .andExpect(status().isNotFound())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Settlement not calculated"))
+                .andExpect(jsonPath("$.loanId").value(LOAN_ID));
     }
 }
