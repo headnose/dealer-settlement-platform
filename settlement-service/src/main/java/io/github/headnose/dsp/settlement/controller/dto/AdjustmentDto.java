@@ -15,4 +15,9 @@ public record AdjustmentDto(
     public Adjustment toAdjustment() {
         return new Adjustment(adjustmentType, amount);
     }
+
+    /** Converts a stored adjustment into the API shape. */
+    public static AdjustmentDto from(Adjustment adjustment) {
+        return new AdjustmentDto(adjustment.adjustmentType(), adjustment.amount());
+    }
 }
