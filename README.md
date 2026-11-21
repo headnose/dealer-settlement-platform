@@ -30,7 +30,7 @@ Finance Ops ──► settlement-service ──► loan-service (mock upstream)
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Docker Compose · JUnit 6 · Mockito
+Docker Compose · JUnit 6 · Mockito · Testcontainers
 
 ## Running locally
 
@@ -40,6 +40,8 @@ Prerequisites: Java 17, Maven, Docker Desktop.
 docker compose up -d          # MySQL, MongoDB, Redis, Kafka, Mailpit
 mvn clean install             # build all modules and run tests
 ```
+settlement-service's MongoDB integration tests start their own throwaway MongoDB with
+Testcontainers, so they need Docker running but never touch the local `settlement_db`.
 
 Then run `LoanServiceApplication` and `SettlementServiceApplication` from your IDE.
 
@@ -161,6 +163,8 @@ Both 404 cases return the same status, so clients tell them apart by the Problem
       business-rule checks, injected `Clock` for value dates, and RFC 9457 error responses
 - [x] settlement-service: settlement detail (`GET`) for wire-service, with distinct 404s for
     "not imported" and "not calculated"
+- [x] settlement-service: MongoDB integration tests run against Testcontainers (fresh `mongo:7`
+    per run, wired with `@ServiceConnection`), isolated from local manual testing
 
 ## Roadmap
 
@@ -184,5 +188,3 @@ Both 404 cases return the same status, so clients tell them apart by the Problem
 - The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable
 - The API rejects amounts with more than 2 decimal places as written (`10.500` → 400), although
   the calculator itself would accept it
-- Integration tests use the same local `settlement_db` as manual testing and can leave documents
-  behind; clear the collection before manual testing
