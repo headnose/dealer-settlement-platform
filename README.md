@@ -12,19 +12,22 @@ Kafka, Redis, and resilience patterns.
 |---|---|---|---|
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
 | settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
-| wire-service | 8083 | MySQL | (in progress) Generates wire statements and tracks delivery |
+| wire-service | 8083 | MySQL | Generates wire statements as drafts (sending and delivery tracking planned) |
 | notification-service | 8084 | Redis | (planned) Consumes Kafka events and sends emails via Mailpit |
 
 ```
 Finance Ops ──► settlement-service ──► loan-service (mock upstream)
-                      │
-                      ▼
-                   MongoDB
+                  │       ▲
+                  ▼       │ GET settlement detail
+               MongoDB    │
+Finance Ops ──► wire-service
+                  │
+                  ▼
+                MySQL
 
 (planned)  wire-service ──► Kafka ──► notification-service ──► Mailpit
-              │                 ▲               │
-              ▼                 └───────────────┘ delivery status
-            MySQL
+                              ▲               │
+                              └───────────────┘ delivery status
 ```
 
 ## Tech stack
@@ -44,7 +47,9 @@ Integration tests start their own throwaway databases with Testcontainers (Mongo
 settlement-service, MySQL 8.4 for wire-service), so they need Docker running but never touch the
 local `settlement_db` or `wire_db`.
 
-Then run `LoanServiceApplication` and `SettlementServiceApplication` from your IDE.
+Then run `LoanServiceApplication`, `SettlementServiceApplication` and `WireServiceApplication`
+from your IDE. On first start, wire-service's Flyway migrations create the tables and seed data in
+the local `wire_db`.
 
 ### Try it
 
@@ -162,7 +167,75 @@ The `loan` object is not in the blueprint's `SettlementDetailDto` tree, but the 
 example settlement document (described as the data returned by `SettlementDetailDto`) includes
 it. It is included so wire-service gets the dealer's name and emails in the same call.
 
-### wire-service data model (in progress)
+### Generate a wire
+
+`POST /api/v1/wires` generates a settlement wire statement for a calculated loan. wire-service
+loads the latest template for the wire type (MySQL), gets the settlement detail from
+settlement-service, merges the two, and saves a `DRAFT` submission with four recipients: the
+dealer and the dealer's bank contact from the loan's dealer record, plus the two standing internal
+distributions.
+
+```bash
+curl -X POST http://localhost:8083/api/v1/wires \
+  -H "Content-Type: application/json" \
+  -d '{"loanId": "LN-1001", "wireType": "SETTLEMENT"}'
+```
+
+Response (`201 Created`):
+
+```json
+{
+  "submissionId": "SUB-…",
+  "status": "DRAFT",
+  "createdTime": "2026-11-21T17:33:10",
+  "notificationRecipients": [
+    {"recipientType": "DEALER", "name": "Riverbend Motors", "email": "accounts@riverbend-motors.example.com"},
+    {"recipientType": "DEALER_BANK_CONTACT", "name": "Riverbend Community Bank", "email": "wires@riverbend-bank.example.com"},
+    {"recipientType": "AUDIT_DISTRIBUTION", "name": "Compliance Audit Team", "email": "compliance-audit@example.com"},
+    {"recipientType": "INTERNAL_OPS_DISTRIBUTION", "name": "Treasury Operations", "email": "treasury-ops@example.com"}
+  ]
+}
+```
+
+The merged wire statement is stored in `wire_submission.content`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<settlementWire>
+    <loanId>LN-1001</loanId>
+    <settlementId>SET-…</settlementId>
+    <dealerName>Riverbend Motors</dealerName>
+    <beneficiaryBank>Riverbend Community Bank</beneficiaryBank>
+    <paymentMethod>WIRE</paymentMethod>
+    <currency>USD</currency>
+    <grossAmount>28500.00</grossAmount>
+    <totalAdjustment>650.00</totalAdjustment>
+    <netSettlement>27850.00</netSettlement>
+    <valueDate>2026-11-23</valueDate>
+</settlementWire>
+```
+
+| Status | When |
+|---|---|
+| 201 | Draft wire created |
+| 400 | Malformed JSON, missing fields, or unknown `wireType` |
+| 422 `Loan not imported` | settlement-service has not imported the loan |
+| 422 `Settlement not calculated` | The loan is imported but its settlement is not calculated yet |
+| 502 | settlement-service is down, timed out (connect 2s, read 5s), or returned 5xx |
+| 500 | Unexpected error, e.g. missing reference data (details are logged, not returned) |
+
+Example 422:
+
+```json
+{"title": "Settlement not calculated", "status": 422, "detail": "Settlement for loan LN-1002 has not been calculated yet", "instance": "/api/v1/wires", "loanId": "LN-1002"}
+```
+
+settlement-service answers 404 for these two cases; wire-service answers 422 because its own
+request is valid but names a loan that cannot be wired yet. The titles are the same in both
+services. The template and settlement-service calls run one after the other; a parallel version
+is planned as a load-test comparison.
+
+### wire-service data model
 
 Flyway owns the MySQL schema (`db/migration`); Hibernate runs with `ddl-auto: validate`, so the
 app refuses to start if an entity and its table disagree.
@@ -198,11 +271,15 @@ with `example.com` addresses) is seeded by migration `V2`, so every environment 
       `MockRestServiceServer`
 - [x] wire-service: template merger that fills `{{placeholder}}` values in one regex pass,
       XML-escapes them, and fails fast on a placeholder with no value
+- [x] wire-service: wire generation (`POST /api/v1/wires`): template + settlement detail merged
+      into a `DRAFT` submission with four recipients in one transaction, remote call kept outside
+      the transaction, RFC 9457 errors (400 / 422 / 502 / 500); verified end to end with all
+      three services
 
 ## Roadmap
 
-- [ ] wire-service: wire templates, submissions, recipients (MySQL + Flyway)
-- [ ] Kafka: email-delivery and delivery-status topics with dead-letter topics
+- [ ] Kafka: send endpoint (`POST /api/v1/wires/{submissionId}/send`), email-delivery and
+      delivery-status topics with dead-letter topics
 - [ ] notification-service: email via Mailpit, Redis idempotency keys
 - [ ] Redis cache-aside for loan data; Resilience4j circuit breaker
 - [ ] Load test wire generation: sequential vs parallel calls
@@ -223,3 +300,5 @@ with `example.com` addresses) is seeded by migration `V2`, so every environment 
   the calculator itself would accept it
 - The settlement wire template shows only the total adjustment, not each adjustment line (simple
   `{{placeholder}}` templates cannot repeat a block per item)
+- Generating a wire twice for the same loan creates two `DRAFT` submissions; there is no
+  duplicate guard yet (planned for the send step, where duplicates would matter)
