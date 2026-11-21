@@ -193,6 +193,9 @@ with `example.com` addresses) is seeded by migration `V2`, so every environment 
       per run, wired with `@ServiceConnection`), isolated from local manual testing
 - [x] wire-service: MySQL schema via Flyway (templates, distributions, submissions, recipients)
       with seed data; JPA entities checked by `ddl-auto: validate` against Testcontainers MySQL
+- [x] wire-service: settlement-service client (`RestClient` with connect/read timeouts) that turns
+      the two 404 titles, 5xx and I/O failures into distinct exceptions; tested with
+      `MockRestServiceServer`
 
 ## Roadmap
 
