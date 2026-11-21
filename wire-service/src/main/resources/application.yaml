@@ -9,6 +9,8 @@ spring:
     hibernate:
       ddl-auto: validate    # Flyway creates tables; Hibernate only checks they match your entities
     open-in-view: false     # don't keep DB connections open during the web response
+  kafka:
+    bootstrap-servers: localhost:9092
 
 server:
   port: 8083
@@ -18,3 +20,7 @@ clients:
     base-url: http://localhost:8082
     connect-timeout: 2s   # time to open the TCP connection
     read-timeout: 5s      # time to wait for the response once connected
+
+topics:
+  partitions: 6
+  replication-factor: 1   # blueprint: >= 3 in production; a single local broker only supports 1
