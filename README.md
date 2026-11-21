@@ -12,7 +12,7 @@ Kafka, Redis, and resilience patterns.
 |---|---|---|---|
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
 | settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
-| wire-service | 8083 | MySQL | (planned) Generates wire statements and tracks delivery |
+| wire-service | 8083 | MySQL | (in progress) Generates wire statements and tracks delivery |
 | notification-service | 8084 | Redis | (planned) Consumes Kafka events and sends emails via Mailpit |
 
 ```
@@ -40,8 +40,9 @@ Prerequisites: Java 17, Maven, Docker Desktop.
 docker compose up -d          # MySQL, MongoDB, Redis, Kafka, Mailpit
 mvn clean install             # build all modules and run tests
 ```
-settlement-service's MongoDB integration tests start their own throwaway MongoDB with
-Testcontainers, so they need Docker running but never touch the local `settlement_db`.
+Integration tests start their own throwaway databases with Testcontainers (MongoDB for
+settlement-service, MySQL 8.4 for wire-service), so they need Docker running but never touch the
+local `settlement_db` or `wire_db`.
 
 Then run `LoanServiceApplication` and `SettlementServiceApplication` from your IDE.
 
@@ -161,6 +162,21 @@ The `loan` object is not in the blueprint's `SettlementDetailDto` tree, but the 
 example settlement document (described as the data returned by `SettlementDetailDto`) includes
 it. It is included so wire-service gets the dealer's name and emails in the same call.
 
+### wire-service data model (in progress)
+
+Flyway owns the MySQL schema (`db/migration`); Hibernate runs with `ddl-auto: validate`, so the
+app refuses to start if an entity and its table disagree.
+
+| Table | Holds |
+|---|---|
+| `wire_template` | Wire templates, one row per revision; the highest `version` per wire type is used |
+| `notification_distribution` | Standing internal recipients added to every wire (audit, treasury ops) |
+| `wire_submission` | One row per generated wire: loan, wire type, status (`DRAFT` → `QUEUED` → `SENT`), merged content |
+| `wire_recipient` | The four recipients of each wire with their delivery status; one per type per wire (unique constraint) |
+
+Reference data (the settlement template `TMP-001` and the distributions `AUDIT-001` and `OPS-001`,
+with `example.com` addresses) is seeded by migration `V2`, so every environment gets it.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -175,6 +191,8 @@ it. It is included so wire-service gets the dealer's name and emails in the same
       loan and dealer contacts, with distinct 404s for "not imported" and "not calculated"
 - [x] settlement-service: MongoDB integration tests run against Testcontainers (fresh `mongo:7`
       per run, wired with `@ServiceConnection`), isolated from local manual testing
+- [x] wire-service: MySQL schema via Flyway (templates, distributions, submissions, recipients)
+      with seed data; JPA entities checked by `ddl-auto: validate` against Testcontainers MySQL
 
 ## Roadmap
 
@@ -198,3 +216,5 @@ it. It is included so wire-service gets the dealer's name and emails in the same
 - The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable
 - The API rejects amounts with more than 2 decimal places as written (`10.500` → 400), although
   the calculator itself would accept it
+- The settlement wire template shows only the total adjustment, not each adjustment line (simple
+  `{{placeholder}}` templates cannot repeat a block per item)
