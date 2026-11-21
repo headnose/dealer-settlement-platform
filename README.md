@@ -196,6 +196,8 @@ with `example.com` addresses) is seeded by migration `V2`, so every environment 
 - [x] wire-service: settlement-service client (`RestClient` with connect/read timeouts) that turns
       the two 404 titles, 5xx and I/O failures into distinct exceptions; tested with
       `MockRestServiceServer`
+- [x] wire-service: template merger that fills `{{placeholder}}` values in one regex pass,
+      XML-escapes them, and fails fast on a placeholder with no value
 
 ## Roadmap
 
