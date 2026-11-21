@@ -2,17 +2,14 @@ package io.github.headnose.dsp.settlement.controller.dto;
 
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
+import io.github.headnose.dsp.settlement.model.LoanStatus;
 import io.github.headnose.dsp.settlement.model.PaymentMethod;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDate;
 import java.util.List;
 
-import static io.github.headnose.dsp.settlement.SettlementTestData.adj;
-import static io.github.headnose.dsp.settlement.SettlementTestData.closedLoan;
-import static io.github.headnose.dsp.settlement.SettlementTestData.money;
-import static io.github.headnose.dsp.settlement.SettlementTestData.settlement;
-import static io.github.headnose.dsp.settlement.SettlementTestData.wirePayment;
+import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 class SettlementDetailDtoTest {
@@ -34,5 +31,18 @@ class SettlementDetailDtoTest {
         assertThat(dto.adjustments()).containsExactly(
                 new AdjustmentDto(AdjustmentType.DEALER_HOLDBACK, money("500.00")),
                 new AdjustmentDto(AdjustmentType.DOC_FEE, money("150.00")));
+
+        assertThat(dto.loan()).isEqualTo(new LoanDto(
+                LOAN_ID,
+                new DealerDto(
+                        "D-100",
+                        "Sunrise Auto Group",
+                        "Sunrise Auto Group Bank",
+                        "dealer@example.com",
+                        "wireops@example.com"),
+                LoanStatus.CLOSED,
+                "USD",
+                money("28500.00"),
+                LocalDate.of(2026, 5, 10)));
     }
 }
