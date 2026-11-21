@@ -205,6 +205,13 @@ class SettlementControllerTest {
                 .andExpect(jsonPath("$.adjustments[0].adjustmentType").value("DEALER_HOLDBACK"))
                 // raw JSON text, so we know the money scale (".00") survived
                 .andExpect(content().string(containsString("\"netSettlement\":27850.00")))
+                .andExpect(jsonPath("$.loan.loanId").value(LOAN_ID))
+                .andExpect(jsonPath("$.loan.dealer.dealerName").value("Sunrise Auto Group"))
+                .andExpect(jsonPath("$.loan.dealer.dealerBankName").value("Sunrise Auto Group Bank"))
+                .andExpect(jsonPath("$.loan.dealer.dealerContactEmail").value("dealer@example.com"))
+                .andExpect(jsonPath("$.loan.dealer.dealerBankContactEmail").value("wireops@example.com"))
+                .andExpect(jsonPath("$.loan.closingDate").value("2026-05-10"))
+                .andExpect(content().string(containsString("\"principalAmount\":28500.00")))
                 .andExpect(content().string(containsString("\"amount\":500.00")));
     }
 

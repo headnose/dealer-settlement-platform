@@ -89,8 +89,6 @@ curl -X PATCH http://localhost:8082/api/v1/loans/LN-1001/settlements \
 
 Business rules:
 
-Business rules:
-
 - net = gross − sum(adjustments); net may be 0 but never negative
 - adjustment amounts must be > 0 with at most 2 decimal places
 - payment currency must match the loan currency (no FX conversion)
@@ -125,8 +123,10 @@ Errors use RFC 9457 Problem Details (`application/problem+json`). Example 400:
 ### Get settlement detail
 
 `GET /api/v1/loans/{loanId}/settlements` returns the calculated settlement for downstream
-services such as wire-service: the settlement amounts, the payment (including the beneficiary
-bank and value date filled in by settlement-service), and the adjustments.
+services such as wire-service: the imported loan (including the dealer's contact emails, which
+wire-service uses to build notification recipients), the settlement amounts, the payment
+(including the beneficiary bank and value date filled in by settlement-service), and the
+adjustments.
 
 ```bash
 curl http://localhost:8082/api/v1/loans/LN-1001/settlements
@@ -134,6 +134,12 @@ curl http://localhost:8082/api/v1/loans/LN-1001/settlements
 
 ```json
 {
+  "loan": {
+    "loanId": "LN-1001",
+    "dealer": {"dealerId": "D-100", "dealerName": "Riverbend Motors", "dealerBankName": "Riverbend Community Bank",
+               "dealerContactEmail": "accounts@riverbend-motors.example.com", "dealerBankContactEmail": "wires@riverbend-bank.example.com"},
+    "status": "CLOSED", "currency": "USD", "principalAmount": 28500.00, "closingDate": "2026-10-15"
+  },
   "settlement": {"settlementId": "SET-…", "grossAmount": 28500.00, "totalAdjustment": 650.00, "netSettlement": 27850.00, "status": "CALCULATED"},
   "payment": {"paymentMethod": "WIRE", "currency": "USD", "beneficiaryBank": "Riverbend Community Bank", "valueDate": "2026-11-23"},
   "adjustments": [
@@ -151,6 +157,10 @@ curl http://localhost:8082/api/v1/loans/LN-1001/settlements
 
 Both 404 cases return the same status, so clients tell them apart by the Problem Details `title`.
 
+The `loan` object is not in the blueprint's `SettlementDetailDto` tree, but the blueprint's
+example settlement document (described as the data returned by `SettlementDetailDto`) includes
+it. It is included so wire-service gets the dealer's name and emails in the same call.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -161,10 +171,10 @@ Both 404 cases return the same status, so clients tell them apart by the Problem
       with per-loan outcomes and idempotent re-import
 - [x] settlement-service: settlement calculation (`PATCH`) with BigDecimal math, Bean Validation,
       business-rule checks, injected `Clock` for value dates, and RFC 9457 error responses
-- [x] settlement-service: settlement detail (`GET`) for wire-service, with distinct 404s for
-    "not imported" and "not calculated"
+- [x] settlement-service: settlement detail (`GET`) for wire-service, including the imported
+      loan and dealer contacts, with distinct 404s for "not imported" and "not calculated"
 - [x] settlement-service: MongoDB integration tests run against Testcontainers (fresh `mongo:7`
-    per run, wired with `@ServiceConnection`), isolated from local manual testing
+      per run, wired with `@ServiceConnection`), isolated from local manual testing
 
 ## Roadmap
 
