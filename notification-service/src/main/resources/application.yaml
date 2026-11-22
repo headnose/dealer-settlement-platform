@@ -35,3 +35,6 @@ topics:
 
 blastmail:
   from: blastmail@example.com
+  idempotency:
+    processing-ttl: 5m                   # a crashed attempt blocks retries at most this long
+    sent-ttl: 30d                        # = DLQ retention, so replaying a DLQ event cannot email twice
