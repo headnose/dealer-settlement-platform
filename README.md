@@ -13,39 +13,57 @@ Kafka, Redis, and resilience patterns.
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
 | settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
 | wire-service | 8083 | MySQL | Generates wire statements, sends them through Kafka, and tracks delivery status |
-| notification-service | 8084 | Redis | (planned) Consumes Kafka events and sends emails via Mailpit |
+| notification-service | 8084 | Redis (its own instance) | Consumes email requests from Kafka, sends the emails over SMTP, and reports each result back |
 
 ```
 Finance Ops ──► settlement-service ──► loan-service (mock upstream)
                   │       ▲
                   ▼       │ GET settlement detail
                MongoDB    │
-Finance Ops ──► wire-service ──► Kafka: email-delivery ──► notification-service (planned) ──► Mailpit
-                  │    ▲                                              │
-                  ▼    └──────────── Kafka: delivery-status ◄─────────┘
-                MySQL
+Finance Ops ──► wire-service ──► Kafka: email-delivery ──► notification-service ──► SMTP (Mailpit)
+                  │    ▲                                        │       │
+                  ▼    └────────── Kafka: delivery-status ◄─────┘       ▼
+                MySQL                                                 Redis
 ```
 
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility
+Spring Mail · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility · GreenMail
 
 ## Running locally
 
 Prerequisites: Java 17, Maven, Docker Desktop.
 
 ```bash
-docker compose up -d          # MySQL, MongoDB, Redis, Kafka, Mailpit
+docker compose up -d          # MySQL, MongoDB, Redis (x2), Kafka, Mailpit
 mvn clean install             # build all modules and run tests
 ```
-Integration tests start their own throwaway containers with Testcontainers (MongoDB for
-settlement-service; MySQL 8.4 and Kafka 3.9.1 for wire-service), so they need Docker running but
-never touch the local `settlement_db`, `wire_db`, or Kafka topics.
 
-Then run `LoanServiceApplication`, `SettlementServiceApplication` and `WireServiceApplication`
-from your IDE. On first start, wire-service's Flyway migrations create the tables and seed data in
-the local `wire_db`, and wire-service creates the Kafka topics it produces to.
+| Container | Port | Used by |
+|---|---|---|
+| `mysql` | 3306 | wire-service |
+| `mongodb` | 27017 | settlement-service |
+| `redis` | 6379 | settlement-service cache (planned) |
+| `blastmail-redis` | 6380 | notification-service idempotency keys |
+| `kafka` | 9092 | wire-service, notification-service |
+| `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
+
+Integration tests start their own throwaway containers with Testcontainers (MongoDB for
+settlement-service; MySQL 8.4 and Kafka 3.9.1 for wire-service; Kafka 3.9.1 and Redis 7 for
+notification-service, plus GreenMail as an in-process SMTP server), so they need Docker running
+but never touch the local databases, Kafka topics or Mailpit.
+
+Then run the four applications from your IDE, or with `mvn -pl <module> spring-boot:run`:
+`LoanServiceApplication`, `SettlementServiceApplication`, `NotificationServiceApplication`, then
+`WireServiceApplication`. On first start, wire-service's Flyway migrations create the tables and
+seed data in the local `wire_db`, and each service creates the Kafka topics it produces to.
+
+On a fresh broker, start notification-service before wire-service: wire-service consumes
+`delivery-status`, and if it starts first the broker auto-creates that topic with 1 partition
+and no retention setting instead of notification-service's 6 partitions and 7 days.
+
+Sent emails can be read at http://localhost:8025 (Mailpit).
 
 ### Try it
 
@@ -231,6 +249,21 @@ request is valid but names a loan that cannot be wired yet. The titles are the s
 services. The template and settlement-service calls run one after the other; a parallel version
 is planned as a load-test comparison.
 
+### wire-service data model
+
+Flyway owns the MySQL schema (`db/migration`); Hibernate runs with `ddl-auto: validate`, so the
+app refuses to start if an entity and its table disagree.
+
+| Table | Holds |
+|---|---|
+| `wire_template` | Wire templates, one row per revision; the highest `version` per wire type is used |
+| `notification_distribution` | Standing internal recipients added to every wire (audit, treasury ops) |
+| `wire_submission` | One row per generated wire: loan, wire type, status (`DRAFT` → `QUEUED` → `SENT`), merged content |
+| `wire_recipient` | The four recipients of each wire with their delivery status (`PENDING` → `SENT` or `FAILED`) and `last_updated`; one per type per wire (unique constraint) |
+
+Reference data (the settlement template `TMP-001` and the distributions `AUDIT-001` and `OPS-001`,
+with `example.com` addresses) is seeded by migration `V2`, so every environment gets it.
+
 ### Send a wire
 
 `POST /api/v1/wires/{submissionId}/send` queues a `DRAFT` wire for email delivery. wire-service
@@ -275,7 +308,7 @@ How sending stays safe:
   result can never arrive for a submission that is still a draft.
 - **A failed publish is undone.** If Kafka does not confirm all four events (producer timeouts
   5s / 10s), the submission goes back to `DRAFT` and the API answers 503. Retrying is safe even
-  after a partial publish, because the email consumer de-duplicates on `recipientId`.
+  after a partial publish, because notification-service de-duplicates on `recipientId`.
 - **Only one wire per loan can be sent.** Generating twice still creates two drafts, but once one
   of them is `QUEUED` or `SENT`, sending another draft for the same loan and wire type returns 409.
 
@@ -294,6 +327,86 @@ Example 409:
 {"title": "Wire already sent", "status": 409, "detail": "A SETTLEMENT wire for loan LN-1001 has already been sent", "instance": "/api/v1/wires/SUB-…/send"}
 ```
 
+### Email delivery (notification-service)
+
+notification-service (the blueprint's "BlastMail") consumes `email-delivery` in consumer group
+`blastmail`. Every instance joins the same group, so each event is handled by exactly one
+instance. For each event it sends one email over SMTP (Mailpit locally) and publishes one
+`DeliveryStatusEvent` to `delivery-status`, keyed by `submissionId` like the request.
+
+The email sent to the treasury distribution for loan LN-1002 (as shown in Mailpit):
+
+```
+From:    blastmail@example.com
+To:      treasury-ops@example.com
+Subject: Settlement Wire Statement - LN-1002
+
+Hello Treasury Operations,
+
+A SETTLEMENT wire statement has been issued for loan LN-1002.
+Submission ID: SUB-…
+
+The wire statement document is not attached in this version.
+
+This is an automated message from the Dealer Settlement Platform. Please do not reply.
+```
+
+The blueprint does not define the email body; it is plain text built from the event. The
+statement attachment is planned (see Roadmap).
+
+**Idempotency (Redis).** `recipientId` is the de-duplication key. notification-service keeps
+its own Redis (`blastmail-redis`, port 6380), separate from the cache Redis planned for
+settlement-service, so one service's evictions or flushes cannot break the other's guarantees.
+Key: `blastmail:delivery:{recipientId}`.
+
+| Key state | Set when | TTL | What a new event for that recipient does |
+|---|---|---|---|
+| (no key) | — | — | Claims the key (`SET … PROCESSING NX`) and sends the email |
+| `PROCESSING` | Just before sending | 5 minutes | Retried later (another attempt is sending, or crashed) |
+| `SENT` | After the SMTP server accepted the email | 30 days (= DLQ retention) | No email; publishes `SENT` again |
+| deleted | When sending failed | — | A retry or a DLQ replay can send |
+
+The order is send → mark `SENT` → publish the result, so every crash point has a safe outcome:
+
+- Crash before sending: the event is redelivered; once the `PROCESSING` key expires it is sent.
+- Crash after sending but before marking `SENT`: the email can go out twice (see Known
+  limitations). Delivery is at-least-once: a duplicate notice is better than a lost one.
+- Crash after marking `SENT` but before publishing: the redelivered event finds `SENT` and only
+  republishes the result, so wire-service still learns about it.
+
+The `delivery-status` result for one recipient (no Java type headers):
+
+```json
+{
+  "eventId": "EVT-…",
+  "eventType": "EMAIL_DELIVERY_COMPLETED",
+  "submissionId": "SUB-…",
+  "loanId": "LN-1002",
+  "recipientId": "REC-…",
+  "deliveryStatus": "SENT",
+  "errorMessage": null,
+  "processedTime": "2026-11-22T14:29:59"
+}
+```
+
+A failed email produces `"eventType": "EMAIL_DELIVERY_FAILED"`, `"deliveryStatus": "FAILED"` and
+the SMTP error in `errorMessage` (e.g. `Mail server connection failed. …`, capped at 500
+characters). The blueprint only shows the success event; the failure event type is this project's
+choice.
+
+Errors:
+
+| Problem | Retried? | Then |
+|---|---|---|
+| Invalid JSON, wrong `eventType`, missing `submissionId` / `recipientId` / `email` | No | `email-delivery-dlq` |
+| SMTP failure (server down, rejected) | 2 retries, 1 s apart | `FAILED` result to `delivery-status`, then `email-delivery-dlq` |
+| Anything else (recipient being processed by another attempt, Redis or Kafka unavailable) | 2 retries, 1 s apart | `email-delivery-dlq` only |
+
+Only an SMTP failure reports `FAILED`, because it is the only case where the email is known not to
+have gone out. The dead-letter topic keeps the original event text unchanged, so after the cause
+is fixed it can be replayed (see the replay command below); the recipient's Redis key was deleted,
+so the replay sends.
+
 ### Delivery status
 
 wire-service listens on `delivery-status` (consumer group `pwt-delivery-status`) for the result
@@ -302,35 +415,22 @@ sets `last_updated` to the event's `processedTime`. When all four recipients are
 submission moves from `QUEUED` to `SENT`. The recipient update and the submission update happen
 in one transaction.
 
-```json
-{
-  "eventId": "EVT-…",
-  "eventType": "EMAIL_DELIVERY_COMPLETED",
-  "submissionId": "SUB-…",
-  "loanId": "LN-1001",
-  "recipientId": "REC-…",
-  "deliveryStatus": "SENT",
-  "errorMessage": null,
-  "processedTime": "2026-11-21T20:30:00"
-}
-```
-
-MySQL after four `SENT` results:
+MySQL after notification-service delivered all four emails for LN-1002:
 
 ```
-+-----------+--------+
-| submission_id | status |
-+-----------+--------+
-| SUB-…     | SENT   |
-+-----------+--------+
-+-----------+---------------------------+-----------------+---------------------+
-| recipient_id | recipient_type         | delivery_status | last_updated        |
-+-----------+---------------------------+-----------------+---------------------+
-| REC-…     | AUDIT_DISTRIBUTION        | SENT            | 2026-11-21 20:30:00 |
-| REC-…     | DEALER                    | SENT            | 2026-11-21 20:30:00 |
-| REC-…     | DEALER_BANK_CONTACT       | SENT            | 2026-11-21 20:30:00 |
-| REC-…     | INTERNAL_OPS_DISTRIBUTION | SENT            | 2026-11-21 20:30:00 |
-+-----------+---------------------------+-----------------+---------------------+
++---------------+---------+--------+
+| submission_id | loan_id | status |
++---------------+---------+--------+
+| SUB-…         | LN-1002 | SENT   |
++---------------+---------+--------+
++---------------------------+---------------------------------------+-----------------+---------------------+
+| recipient_type            | email                                 | delivery_status | last_updated        |
++---------------------------+---------------------------------------+-----------------+---------------------+
+| AUDIT_DISTRIBUTION        | compliance-audit@example.com          | SENT            | 2026-11-22 14:29:59 |
+| DEALER                    | accounts@riverbend-motors.example.com | SENT            | 2026-11-22 14:29:59 |
+| DEALER_BANK_CONTACT       | wires@riverbend-bank.example.com      | SENT            | 2026-11-22 14:29:59 |
+| INTERNAL_OPS_DISTRIBUTION | treasury-ops@example.com              | SENT            | 2026-11-22 14:29:59 |
++---------------------------+---------------------------------------+-----------------+---------------------+
 ```
 
 Why this is safe:
@@ -340,7 +440,8 @@ Why this is safe:
 - Applying the same event twice gives the same result, so Kafka's at-least-once redelivery is
   harmless. Offsets are committed only after an event is processed (or dead-lettered).
 - A `FAILED` result marks that recipient `FAILED`; the submission stays `QUEUED` (the blueprint
-  defines no failed submission status) and the error message is logged.
+  defines no failed submission status) and the error message is logged. A later `SENT` result for
+  the same recipient (e.g. after a replay) replaces `FAILED`.
 
 Errors:
 
@@ -355,22 +456,201 @@ so it can be inspected and replayed.
 
 ### Kafka topics
 
-| Topic | Producer | Consumer | Partitions | Retention |
+| Topic | Producer | Consumer (group) | Partitions | Retention |
 |---|---|---|---|---|
-| `email-delivery` | wire-service | notification-service (planned) | 6 | 7 days |
-| `delivery-status` | notification-service (planned) | wire-service | — (see limitations) | — |
+| `email-delivery` | wire-service | notification-service (`blastmail`) | 6 | 7 days |
+| `delivery-status` | notification-service | wire-service (`pwt-delivery-status`) | 6 | 7 days |
+| `email-delivery-dlq` | notification-service | support / replay | 6 | 30 days |
 | `delivery-status-dlq` | wire-service | support / replay | 6 | 30 days |
-| `email-delivery-dlq` | notification-service (planned) | support / replay | — | — |
 
-Each service declares the topics it produces to. The producer uses `acks=all` with idempotence
-enabled. Replication factor is a setting (`topics.replication-factor`): 1 on the single local
-broker, 3 or more in a real cluster.
+Each service declares the topics it produces to, so every topic has one owner that sets its
+partitions and retention. Producers use `acks=all` with idempotence enabled. Replication factor
+is a setting (`topics.replication-factor`): 1 on the single local broker, 3 or more in a real
+cluster. A dead-letter record goes to the same partition number as the original, which is why the
+DLQs have 6 partitions too.
+
+`delivery-status` on the local broker, before notification-service existed (auto-created by the
+broker) and after notification-service declared it:
+
+```
+Topic: delivery-status  PartitionCount: 1  ReplicationFactor: 1  Configs:
+Topic: delivery-status  PartitionCount: 6  ReplicationFactor: 1  Configs: retention.ms=604800000
+```
 
 ### Try the Kafka flow by hand
 
-With all three services running and a calculated loan, generate a wire, then send it as shown
-above. To watch the events:
+With all four services running and a calculated loan, generate a wire, then send it as shown
+above. The four emails appear in Mailpit (http://localhost:8025). To watch the events (stop with
+Ctrl+C; Docker then prints a "Debug this Compose error" hint, which can be ignored):
 
 ```bash
+# Requests published by wire-service
 docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-  --topic email-delivery --from-beginning --property
+  --topic email-delivery --from-beginning --property print.key=true --property print.headers=true
+
+# Results published by notification-service
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic delivery-status --from-beginning --property print.key=true --property print.headers=true
+```
+
+Each record prints as `NO_HEADERS  SUB-…  {json}`: no type headers, keyed by `submissionId`.
+
+Check the result in MySQL and the idempotency keys in Redis:
+
+```bash
+docker compose exec mysql mysql -udsp -pdsp wire_db \
+  -e "SELECT recipient_type, delivery_status, last_updated FROM wire_recipient WHERE submission_id='SUB-…';"
+
+docker compose exec blastmail-redis redis-cli --scan --pattern 'blastmail:delivery:*'
+docker compose exec blastmail-redis redis-cli TTL blastmail:delivery:REC-…    # about 2592000 s = 30 days
+```
+
+**Failure and replay.** Stopping Mailpit before sending shows the failure path. This run used loan
+LN-2001:
+
+```bash
+docker compose stop mailpit
+curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send      # still 202: delivery is asynchronous
+```
+
+notification-service tries each email three times, publishes `FAILED`, and dead-letters the
+event. Retries hold up the rest of that partition, so the four recipients fail one after another:
+
+```
++---------------------------+-----------------+---------------------+
+| recipient_type            | delivery_status | last_updated        |
++---------------------------+-----------------+---------------------+
+| AUDIT_DISTRIBUTION        | FAILED          | 2026-11-22 14:38:54 |
+| DEALER                    | FAILED          | 2026-11-22 14:38:56 |
+| DEALER_BANK_CONTACT       | FAILED          | 2026-11-22 14:38:59 |
+| INTERNAL_OPS_DISTRIBUTION | FAILED          | 2026-11-22 14:39:02 |
++---------------------------+-----------------+---------------------+
+```
+
+The submission stays `QUEUED`, and `email-delivery-dlq` holds the four original events with
+headers such as `kafka_dlt-exception-fqcn` (Spring's `ListenerExecutionFailedException`),
+`kafka_dlt-exception-cause-fqcn` (`EmailSendException`) and `kafka_dlt-original-topic`.
+
+To replay, bring SMTP back and copy the dead-lettered events, with their keys, back to
+`email-delivery`. This is a manual stand-in for the blueprint's "Support / Retry Job":
+
+```bash
+docker compose start mailpit
+docker compose exec -T kafka sh -c '/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic email-delivery-dlq --from-beginning --timeout-ms 5000 --property print.key=true --property key.separator="|" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic email-delivery --property parse.key=true --property key.separator="|"'
+```
+
+The console consumer ends by logging `ERROR ... TimeoutException` followed by
+`Processed a total of 4 messages`; that is how `--timeout-ms` stops it, not a failure. All four
+emails are then sent, each recipient goes from `FAILED` to `SENT`, and the submission becomes
+`SENT`:
+
+```
++--------+
+| status |
++--------+
+| SENT   |
++--------+
++---------------------------+-----------------+---------------------+
+| recipient_type            | delivery_status | last_updated        |
++---------------------------+-----------------+---------------------+
+| AUDIT_DISTRIBUTION        | SENT            | 2026-11-22 14:42:50 |
+| DEALER                    | SENT            | 2026-11-22 14:42:50 |
+| DEALER_BANK_CONTACT       | SENT            | 2026-11-22 14:42:50 |
+| INTERNAL_OPS_DISTRIBUTION | SENT            | 2026-11-22 14:42:50 |
++---------------------------+-----------------+---------------------+
+```
+
+Replaying the whole DLQ is safe even if some of its events were already delivered: those find
+`SENT` in Redis and only republish the result.
+
+When a new consumer group is added to a topic that already has history, start it at the end of the
+topic so old events are not processed again:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group blastmail --topic email-delivery --reset-offsets --to-latest --execute
+```
+
+## What works so far
+
+- [x] Multi-module Maven project and Docker Compose infrastructure
+- [x] loan-service: `GET /api/v1/loans/{loanId}` with `@WebMvcTest` tests
+- [x] settlement-service: MongoDB document model (one document per loan, Decimal128 money,
+      optimistic locking with `@Version`, audit timestamps) with `@DataMongoTest` tests
+- [x] settlement-service: concurrent loan import (`CompletableFuture` on a dedicated thread pool)
+      with per-loan outcomes and idempotent re-import
+- [x] settlement-service: settlement calculation (`PATCH`) with BigDecimal math, Bean Validation,
+      business-rule checks, injected `Clock` for value dates, and RFC 9457 error responses
+- [x] settlement-service: settlement detail (`GET`) for wire-service, including the imported
+      loan and dealer contacts, with distinct 404s for "not imported" and "not calculated"
+- [x] settlement-service: MongoDB integration tests run against Testcontainers (fresh `mongo:7`
+      per run, wired with `@ServiceConnection`), isolated from local manual testing
+- [x] wire-service: MySQL schema via Flyway (templates, distributions, submissions, recipients)
+      with seed data; JPA entities checked by `ddl-auto: validate` against Testcontainers MySQL
+- [x] wire-service: settlement-service client (`RestClient` with connect/read timeouts) that turns
+      the two 404 titles, 5xx and I/O failures into distinct exceptions; tested with
+      `MockRestServiceServer`
+- [x] wire-service: template merger that fills `{{placeholder}}` values in one regex pass,
+      XML-escapes them, and fails fast on a placeholder with no value
+- [x] wire-service: wire generation (`POST /api/v1/wires`): template + settlement detail merged
+      into a `DRAFT` submission with four recipients in one transaction, remote call kept outside
+      the transaction, RFC 9457 errors (400 / 422 / 502 / 500); verified end to end with all
+      three services
+- [x] wire-service: wire sending (`POST /api/v1/wires/{submissionId}/send`): atomic
+      `DRAFT` → `QUEUED` claim, four events published to Kafka with broker acknowledgement,
+      revert to `DRAFT` and 503 if Kafka does not confirm, duplicate-send guard per loan
+- [x] wire-service: `delivery-status` consumer that updates recipients and completes the
+      submission, with retries and a dead-letter topic; Kafka + MySQL integration tests
+- [x] notification-service: `email-delivery` consumer that sends one email per recipient over SMTP,
+      de-duplicates on `recipientId` in its own Redis, and publishes `SENT` / `FAILED` results
+- [x] notification-service: retries, `FAILED` result and `email-delivery-dlq` for SMTP failures;
+      unit tests plus integration tests against Testcontainers Kafka and Redis and a GreenMail SMTP
+      server (happy path, duplicate event, invalid JSON, SMTP down)
+- [x] Workflow 4 verified end to end with all four services: send → four emails in Mailpit →
+      submission `SENT`; and SMTP down → `FAILED` + DLQ → replay → `SENT`
+
+## Roadmap
+
+- [ ] Wire statement attachment: store the XML in MinIO (S3-compatible) and attach it to the email
+- [ ] Redis cache-aside for loan data; Resilience4j circuit breaker
+- [ ] Load test wire generation: sequential vs parallel calls (and check the HTTP and Kafka
+      producer timeouts)
+- [ ] Observability: Prometheus, Grafana, OpenTelemetry
+- [ ] Automated retry job for the dead-letter topics
+- [ ] Maybe: a short-lived AWS demo deployment
+
+## Known limitations
+
+- No HTTP timeout on the loan-service call; a hung upstream can tie up import threads
+- `LocalDate` fields (`closingDate`, `valueDate`) are stored as local midnight in MongoDB and
+  can shift a day across timezones
+- FAILED import messages expose internal details (exception class, internal URL)
+- Two simultaneous imports of the same loan report FAILED instead of ALREADY_IMPORTED
+  (data stays safe because `_id` is unique)
+- Value dates skip weekends only; there is no holiday calendar (e.g. a value date can fall on
+  New Year's Day)
+- The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable
+- The API rejects amounts with more than 2 decimal places as written (`10.500` → 400), although
+  the calculator itself would accept it
+- The settlement wire template shows only the total adjustment, not each adjustment line (simple
+  `{{placeholder}}` templates cannot repeat a block per item)
+- Generating a wire twice for the same loan creates two `DRAFT` submissions; only one of them can
+  be sent
+- The duplicate-send guard is check-then-act: two different drafts for the same loan sent at the
+  same instant could both pass it
+- No transactional outbox: if wire-service crashes between claiming `QUEUED` and publishing the
+  events, the submission stays `QUEUED` with no events
+- No email attachment yet: `attachmentPath` is always `null` (MinIO planned)
+- Replication factor is 1 locally (the blueprint asks for at least 3)
+- A `FAILED` delivery leaves the submission `QUEUED`; the error message is logged by wire-service,
+  not stored (the blueprint's recipient table has no column for it)
+- There is no endpoint to read a submission's status (the blueprint defines none)
+- Email delivery is at-least-once: a crash after the SMTP server accepted an email but before its
+  Redis key is marked `SENT` can send that email twice
+- If notification-service crashes while sending, a redelivered event finds the `PROCESSING` key,
+  exhausts its retries within seconds, and is dead-lettered without a `FAILED` result; the
+  recipient stays `PENDING` until the event is replayed (after the 5-minute key expiry)
+- Retries block their partition: while one event is retried, later events on the same partition
+  wait (non-blocking retry topics would avoid this)
+- Dead-letter replay is a manual command; there is no automated retry job yet
+- Every dead-lettered record logs a full stack trace at WARN, which is noisy
