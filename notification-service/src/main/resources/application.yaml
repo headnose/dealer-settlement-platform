@@ -1,5 +1,37 @@
 spring:
   application:
     name: notification-service
+  kafka:
+    bootstrap-servers: localhost:9092
+    consumer:
+      group-id: blastmail                # all BlastMail instances share one group: each event handled by one instance
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer   # raw JSON, parsed in code (B1)
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000
+        request.timeout.ms: 5000
+        delivery.timeout.ms: 10000
+        spring.json.add.type.headers: false
+  data:
+    redis:
+      host: localhost
+      port: 6380                         # blastmail-redis, not LSC's redis on 6379
+  mail:
+    host: localhost
+    port: 1025                           # Mailpit SMTP
+
 server:
   port: 8084
+
+topics:
+  partitions: 6
+  replication-factor: 1                  # 1 locally, blueprint >= 3
+
+blastmail:
+  from: blastmail@example.com
