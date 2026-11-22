@@ -21,6 +21,9 @@ spring:
         delivery.timeout.ms: 10000  # total time incl. retries; must be >= linger.ms + request.timeout.ms
         spring.json.add.type.headers: false   # JSON is the contract, not PWT's Java class names
 
+    consumer:
+      auto-offset-reset: earliest   # a NEW consumer group starts at the beginning, so no early events are skipped
+
 server:
   port: 8083
 
