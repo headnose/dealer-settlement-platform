@@ -29,12 +29,19 @@ services:
     volumes:
       - mongo-data:/data/db
 
-  # Cache (settlement-service) + idempotency keys (notification-service), week 4
+  # Cache for settlement-service (LSC cache-aside, planned)
   redis:
     image: redis:7-alpine
     container_name: dsp-redis
     ports:
       - "6379:6379"
+
+  # Idempotency keys for notification-service (BlastMail's own Redis, separate from LSC's cache)
+  blastmail-redis:
+    image: redis:7-alpine
+    container_name: dsp-blastmail-redis
+    ports:
+      - "6380:6379"                    # host 6380 -> container 6379 (6379 on the host is taken by redis)
 
   # Message broker, week 3. KRaft mode = no ZooKeeper needed.
   kafka:
