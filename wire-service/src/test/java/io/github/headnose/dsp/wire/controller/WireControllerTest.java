@@ -37,6 +37,7 @@ import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
 import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
 import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
 import io.github.headnose.dsp.wire.service.WireSendService;
+import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
 
 @WebMvcTest(WireController.class)
 class WireControllerTest {
@@ -184,7 +185,7 @@ class WireControllerTest {
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
     }
 
-    // ---------- send: 202 / 404 / 409 / 409 / 503 ----------
+    // ---------- send: 202 / 404 / 409 / 409 / 503 / 503 ----------
 
     @Test
     void sendReturns202WithQueuedStatus() throws Exception {
@@ -241,5 +242,19 @@ class WireControllerTest {
                 .andExpect(jsonPath("$.title").value("Email delivery unavailable"))
                 .andExpect(content().string(not(containsString("Kafka"))))
                 .andExpect(content().string(not(containsString("metadata"))));
+    }
+
+    @Test
+    void sendReturns503WithoutLeakingStorageInternals() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenThrow(new WireStatementStorageException(
+                        "Failed to upload wire statement s3://wire-statements/SUB-1/LN-1001.xml",
+                        new RuntimeException("Unable to execute HTTP request: Connect to localhost:8333 failed")));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.title").value("Wire statement storage unavailable"))
+                .andExpect(content().string(not(containsString("s3://"))))
+                .andExpect(content().string(not(containsString("8333"))));
     }
 }
