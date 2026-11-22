@@ -1,8 +1,8 @@
 package io.github.headnose.dsp.notification.messaging;
 
 import io.github.headnose.dsp.notification.config.KafkaTopics;
+import io.github.headnose.dsp.notification.service.DeliveryFailedException;
 import io.github.headnose.dsp.notification.service.EmailDeliveryService;
-import io.github.headnose.dsp.notification.service.EmailSendException;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -20,9 +20,10 @@ import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Last stop for an email-delivery record that failed every attempt (B5).
- * SMTP failure: publish FAILED so PWT shows it (D19), THEN dead-letter the original event
- * so Support / Retry Job can replay it (its Redis key was released, so a replay sends).
+ * Last stop for an email-delivery record that failed every attempt (B5, D26).
+ * Known "no email went out" failure (DeliveryFailedException: SMTP, statement missing, storage
+ * down): publish FAILED so PWT shows it (D19), THEN dead-letter the original event so
+ * Support / Retry Job can replay it (its Redis key was released, so a replay sends).
  * Anything else: dead-letter only (no trustworthy result to report).
  */
 @Component
@@ -52,11 +53,11 @@ public class EmailDeliveryRecoverer implements ConsumerRecordRecoverer {
 
     @Override
     public void accept(ConsumerRecord<?, ?> record, Exception exception) {
-        EmailSendException sendFailure = findCause(exception, EmailSendException.class);
-        if (sendFailure != null) {
+        DeliveryFailedException deliveryFailure = findCause(exception, DeliveryFailedException.class);
+        if (deliveryFailure != null) {
             // Only reached after deliver() parsed and validated the event, so this parse succeeds
             EmailDeliveryEvent event = jsonMapper.readValue((String) record.value(), EmailDeliveryEvent.class);
-            emailDeliveryService.reportFailure(event, sendFailure);
+            emailDeliveryService.reportFailure(event, deliveryFailure);
         }
         log.warn("Dead-lettering email-delivery record: key={} partition={} offset={}",
                 record.key(), record.partition(), record.offset(), exception);
