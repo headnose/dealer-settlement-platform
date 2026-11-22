@@ -32,7 +32,7 @@ import tools.jackson.databind.json.JsonMapper;
  * email-delivery as raw JSON, exactly as BlastMail will. Contract test for the event format.
  */
 @SpringBootTest
-@Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class})
+@Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class, SeaweedFsTestContainerConfig.class})
 class WireSendIntegrationTest {
 
     @Autowired

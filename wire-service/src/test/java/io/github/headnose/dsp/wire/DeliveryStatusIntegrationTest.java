@@ -34,7 +34,7 @@ import org.testcontainers.kafka.KafkaContainer;
 
 /** BlastMail's side is simulated: we publish delivery-status JSON and watch MySQL change. */
 @SpringBootTest
-@Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class})
+@Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class, SeaweedFsTestContainerConfig.class})
 class DeliveryStatusIntegrationTest {
 
     private static final LocalDateTime PROCESSED = LocalDateTime.of(2026, 11, 21, 14, 35, 41);
