@@ -2,7 +2,7 @@
 
 A personal learning project: Java/Spring Boot microservices that model a dealer loan settlement
 and wire-notification workflow. Built to practice microservice design, concurrency, MongoDB/MySQL,
-Kafka, Redis, and resilience patterns.
+Kafka, Redis, S3-compatible object storage, and resilience patterns.
 
 **Status:** 🚧 In progress
 
@@ -12,8 +12,8 @@ Kafka, Redis, and resilience patterns.
 |---|---|---|---|
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
 | settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
-| wire-service | 8083 | MySQL | Generates wire statements, sends them through Kafka, and tracks delivery status |
-| notification-service | 8084 | Redis (its own instance) | Consumes email requests from Kafka, sends the emails over SMTP, and reports each result back |
+| wire-service | 8083 | MySQL, S3 (SeaweedFS) | Generates wire statements, stores them in S3, sends them through Kafka, and tracks delivery status |
+| notification-service | 8084 | Redis (its own instance), S3 (read) | Consumes email requests from Kafka, downloads the statement, emails it as an attachment over SMTP, and reports each result back |
 
 ```
 Finance Ops ──► settlement-service ──► loan-service (mock upstream)
@@ -21,22 +21,24 @@ Finance Ops ──► settlement-service ──► loan-service (mock upstream)
                   ▼       │ GET settlement detail
                MongoDB    │
 Finance Ops ──► wire-service ──► Kafka: email-delivery ──► notification-service ──► SMTP (Mailpit)
-                  │    ▲                                        │       │
-                  ▼    └────────── Kafka: delivery-status ◄─────┘       ▼
-                MySQL                                                 Redis
+                  │  │  ▲                                     │  │    │
+                  │  │  └────────── Kafka: delivery-status ◄──┘  │    ▼
+                  ▼  │ upload statement                download │  Redis
+                MySQL└──────────────► S3 (SeaweedFS) ◄──────────┘
 ```
 
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Spring Mail · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility · GreenMail
+Spring Mail · AWS SDK for Java v2 (S3) · SeaweedFS · Docker Compose · JUnit 6 · Mockito ·
+Testcontainers · Awaitility · GreenMail
 
 ## Running locally
 
 Prerequisites: Java 17, Maven, Docker Desktop.
 
 ```bash
-docker compose up -d          # MySQL, MongoDB, Redis (x2), Kafka, Mailpit
+docker compose up -d          # MySQL, MongoDB, Redis (x2), Kafka, Mailpit, SeaweedFS
 mvn clean install             # build all modules and run tests
 ```
 
@@ -48,11 +50,12 @@ mvn clean install             # build all modules and run tests
 | `blastmail-redis` | 6380 | notification-service idempotency keys |
 | `kafka` | 9092 | wire-service, notification-service |
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
+| `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB for
-settlement-service; MySQL 8.4 and Kafka 3.9.1 for wire-service; Kafka 3.9.1 and Redis 7 for
-notification-service, plus GreenMail as an in-process SMTP server), so they need Docker running
-but never touch the local databases, Kafka topics or Mailpit.
+settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
+and SeaweedFS for notification-service, plus GreenMail as an in-process SMTP server), so they need
+Docker running but never touch the local databases, Kafka topics, bucket or Mailpit.
 
 Then run the four applications from your IDE, or with `mvn -pl <module> spring-boot:run`:
 `LoanServiceApplication`, `SettlementServiceApplication`, `NotificationServiceApplication`, then
@@ -63,7 +66,9 @@ On a fresh broker, start notification-service before wire-service: wire-service 
 `delivery-status`, and if it starts first the broker auto-creates that topic with 1 partition
 and no retention setting instead of notification-service's 6 partitions and 7 days.
 
-Sent emails can be read at http://localhost:8025 (Mailpit).
+Sent emails can be read at http://localhost:8025 (Mailpit). The compose SeaweedFS creates the
+`wire-statements` bucket itself on startup; it has no volume, so `docker compose down` empties it
+(`stop` / `start` keep the data).
 
 ### Try it
 
@@ -267,9 +272,9 @@ with `example.com` addresses) is seeded by migration `V2`, so every environment 
 ### Send a wire
 
 `POST /api/v1/wires/{submissionId}/send` queues a `DRAFT` wire for email delivery. wire-service
-publishes one `EmailDeliveryEvent` per recipient to the `email-delivery` topic and moves the
-submission to `QUEUED`. The emails themselves are sent asynchronously, so the answer is
-`202 Accepted`, not `200`.
+stores the wire statement in S3, publishes one `EmailDeliveryEvent` per recipient to the
+`email-delivery` topic, and moves the submission to `QUEUED`. The emails themselves are sent
+asynchronously, so the answer is `202 Accepted`, not `200`.
 
 ```bash
 curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send
@@ -281,26 +286,31 @@ Response (`202 Accepted`):
 {"submissionId": "SUB-…", "status": "QUEUED"}
 ```
 
-One of the four events on `email-delivery` (key = `submissionId`, no Java type headers):
+One of the four events on `email-delivery` (key = `submissionId`, no Java type headers), from a
+real run:
 
 ```json
 {
-  "eventId": "EVT-…",
+  "eventId": "EVT-4e97951f-…",
   "eventType": "EMAIL_DELIVERY_REQUESTED",
-  "submissionId": "SUB-…",
+  "submissionId": "SUB-d7202795-77c1-430f-8083-a19dc06856d6",
   "loanId": "LN-1001",
-  "recipientId": "REC-…",
-  "recipientName": "Riverbend Motors",
-  "email": "accounts@riverbend-motors.example.com",
+  "recipientId": "REC-686accba-…",
+  "recipientName": "Compliance Audit Team",
+  "email": "compliance-audit@example.com",
   "wireType": "SETTLEMENT",
   "subject": "Settlement Wire Statement - LN-1001",
-  "attachmentPath": null,
-  "createdTime": "2026-11-21T20:18:41"
+  "attachmentPath": "s3://wire-statements/SUB-d7202795-77c1-430f-8083-a19dc06856d6/LN-1001.xml",
+  "createdTime": "2026-11-22T18:22:59"
 }
 ```
 
 How sending stays safe:
 
+- **The statement is stored first.** The upload happens before the claim, so if storage is down
+  nothing has changed yet: the API answers 503 and the submission is still a `DRAFT`. Uploading
+  again (on a retry, or by a request that then loses the claim race) writes the same bytes to the
+  same key, so it is harmless.
 - **Only a `DRAFT` can be sent.** The status change is one atomic
   `UPDATE … SET status = 'QUEUED' WHERE status = 'DRAFT'`, so if two users click Send at the same
   time, exactly one wins and the other gets 409.
@@ -318,6 +328,7 @@ How sending stays safe:
 | 404 `Submission not found` | No submission with this ID |
 | 409 `Submission not sendable` | The submission is already `QUEUED` or `SENT`, or another request is sending it |
 | 409 `Wire already sent` | Another submission for the same loan and wire type was already queued or sent |
+| 503 `Wire statement storage unavailable` | The statement could not be stored (S3 down, timeout 2s per attempt / 5s total); still a `DRAFT`, retry later |
 | 503 `Email delivery unavailable` | Kafka did not confirm the events; the submission is still a `DRAFT`, so retry later |
 | 500 | Unexpected error (details are logged, not returned) |
 
@@ -327,32 +338,88 @@ Example 409:
 {"title": "Wire already sent", "status": 409, "detail": "A SETTLEMENT wire for loan LN-1001 has already been sent", "instance": "/api/v1/wires/SUB-…/send"}
 ```
 
+### Wire statement storage (S3)
+
+The blueprint's event carries an `attachmentPath` such as `s3://wire-statements/…`. The statement
+XML is stored in an S3 bucket at send time and downloaded by notification-service to attach it.
+
+- **Object layout:** bucket `wire-statements`, key `{submissionId}/{loanId}.xml`, content type
+  `application/xml; charset=UTF-8`, bytes = `wire_submission.content`. The blueprint example uses
+  the dealer ID as the file name; this project uses the loan ID because `wire_submission` has no
+  dealer column.
+- **Local store: SeaweedFS, not MinIO.** MinIO was the original plan, but MinIO stopped publishing
+  its community Docker images in October 2025 and later put the open-source repository into
+  maintenance mode. SeaweedFS (Apache 2.0) runs as a single container (`weed mini`) and creates the
+  bucket from an environment variable.
+- **Client: AWS SDK for Java v2 `S3Client`,** not a product-specific client. Locally it uses an
+  endpoint override and path-style URLs (`localhost:8333/wire-statements/key`); against real AWS S3
+  the endpoint is left empty and credentials come from the default chain (an IAM role). Checksums
+  are sent only when required, because recent SDK versions add checksum headers by default that
+  some S3-compatible stores reject.
+- **The bucket belongs to the infrastructure,** not the apps: compose and the test containers
+  create it; in AWS it would be Terraform. (Kafka topics are different: the apps declare those.)
+- **notification-service only reads from the configured bucket.** The path arrives in a Kafka
+  event, so anything that is not `s3://wire-statements/<key>` is rejected as an invalid event;
+  otherwise a bad event could make it fetch and email any object its credentials can read.
+- **Each service has its own copy** of the storage settings and `S3Config` (no shared module), the
+  same rule as for the event classes.
+
+Settings (`storage:` in each `application.yaml`): `endpoint`, `region`, `access-key`, `secret-key`,
+`bucket`, `path-style-access`, `api-call-attempt-timeout` (2s), `api-call-timeout` (5s). Missing
+required values stop the app at startup (`@Validated`).
+
+Read a stored statement with curl (it signs the request itself, no AWS CLI needed):
+
+```bash
+curl --aws-sigv4 "aws:amz:us-east-1:s3" --user "dsp-local:dsp-local-secret" \
+  localhost:8333/wire-statements/SUB-…/LN-1001.xml
+```
+
+**Storage down at send time.** With SeaweedFS stopped, sending a new LN-1001 draft:
+
+```bash
+docker compose stop seaweedfs
+curl -i -X POST http://localhost:8083/api/v1/wires/SUB-…/send
+```
+
+```
+HTTP/1.1 503
+{"detail":"Could not store the wire statement. It is still a DRAFT; try again later.","instance":"/api/v1/wires/SUB-0d44ed47-fdd2-4504-abfc-d1c27a12f3b5/send","status":503,"title":"Wire statement storage unavailable"}
+```
+
+MySQL still shows `DRAFT` and no events were published. After `docker compose start seaweedfs`,
+the same request answered `202 QUEUED` and the submission ended `SENT`.
+
 ### Email delivery (notification-service)
 
 notification-service (the blueprint's "BlastMail") consumes `email-delivery` in consumer group
 `blastmail`. Every instance joins the same group, so each event is handled by exactly one
-instance. For each event it sends one email over SMTP (Mailpit locally) and publishes one
-`DeliveryStatusEvent` to `delivery-status`, keyed by `submissionId` like the request.
+instance. For each event it downloads the wire statement from S3, sends one email over SMTP
+(Mailpit locally) with the statement attached, and publishes one `DeliveryStatusEvent` to
+`delivery-status`, keyed by `submissionId` like the request.
 
-The email sent to the treasury distribution for loan LN-1002 (as shown in Mailpit):
+The email sent to the treasury distribution for loan LN-1001 (as shown in Mailpit):
 
 ```
 From:    blastmail@example.com
 To:      treasury-ops@example.com
-Subject: Settlement Wire Statement - LN-1002
+Subject: Settlement Wire Statement - LN-1001
+Attachment: LN-1001.xml (631 B, application/xml)
 
 Hello Treasury Operations,
 
-A SETTLEMENT wire statement has been issued for loan LN-1002.
-Submission ID: SUB-…
+A SETTLEMENT wire statement has been issued for loan LN-1001.
+Submission ID: SUB-0d44ed47-fdd2-4504-abfc-d1c27a12f3b5
 
-The wire statement document is not attached in this version.
+The wire statement is attached (LN-1001.xml).
 
 This is an automated message from the Dealer Settlement Platform. Please do not reply.
 ```
 
-The blueprint does not define the email body; it is plain text built from the event. The
-statement attachment is planned (see Roadmap).
+The blueprint does not define the email body or sender; the body is plain text built from the
+event, and the message is multipart (text + XML attachment). The order per event is: validate
+(including the attachment path) → claim the Redis key → download → send. A duplicate event that
+finds `SENT` in Redis never downloads anything.
 
 **Idempotency (Redis).** `recipientId` is the de-duplication key. notification-service keeps
 its own Redis (`blastmail-redis`, port 6380), separate from the cache Redis planned for
@@ -398,14 +465,19 @@ Errors:
 
 | Problem | Retried? | Then |
 |---|---|---|
-| Invalid JSON, wrong `eventType`, missing `submissionId` / `recipientId` / `email` | No | `email-delivery-dlq` |
+| Invalid JSON, wrong `eventType`, missing `submissionId` / `recipientId` / `email`, `attachmentPath` missing or outside the `wire-statements` bucket | No | `email-delivery-dlq` |
+| Statement not found in S3 (`NoSuchKey`) | No | `FAILED` result to `delivery-status`, then `email-delivery-dlq` |
+| Statement download failed (S3 down, timeout, 5xx) | 2 retries, 1 s apart | `FAILED` result to `delivery-status`, then `email-delivery-dlq` |
 | SMTP failure (server down, rejected) | 2 retries, 1 s apart | `FAILED` result to `delivery-status`, then `email-delivery-dlq` |
 | Anything else (recipient being processed by another attempt, Redis or Kafka unavailable) | 2 retries, 1 s apart | `email-delivery-dlq` only |
 
-Only an SMTP failure reports `FAILED`, because it is the only case where the email is known not to
-have gone out. The dead-letter topic keeps the original event text unchanged, so after the cause
-is fixed it can be replayed (see the replay command below); the recipient's Redis key was deleted,
-so the replay sends.
+`FAILED` is reported only when the email is known not to have gone out: an SMTP failure, or a
+statement that could not be downloaded (the download happens before SMTP). In code these share one
+parent exception, `DeliveryFailedException`, which is what the recoverer checks for. A missing
+statement is not retried because wire-service uploads before it publishes, so it will not appear a
+second later. The dead-letter topic keeps the original event text unchanged, so after the cause is
+fixed it can be replayed (see the replay command below); the recipient's Redis key was deleted, so
+the replay sends.
 
 ### Delivery status
 
@@ -415,7 +487,9 @@ sets `last_updated` to the event's `processedTime`. When all four recipients are
 submission moves from `QUEUED` to `SENT`. The recipient update and the submission update happen
 in one transaction.
 
-MySQL after notification-service delivered all four emails for LN-1002:
+MySQL after notification-service delivered all four emails for LN-1002 (before attachments were
+added; the LN-1001 run with attachments ended the same way, all four `SENT` at 18:23:00 for events
+created at 18:22:59):
 
 ```
 +---------------+---------+--------+
@@ -608,16 +682,24 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
       server (happy path, duplicate event, invalid JSON, SMTP down)
 - [x] Workflow 4 verified end to end with all four services: send → four emails in Mailpit →
       submission `SENT`; and SMTP down → `FAILED` + DLQ → replay → `SENT`
+- [x] Wire statement attachment: wire-service uploads the statement to S3 (SeaweedFS locally,
+      AWS SDK v2) before claiming the send, with 503 and no state change if storage is down;
+      notification-service validates the path, downloads the statement and sends it as an email
+      attachment, with `FAILED` + DLQ for a missing or unreachable statement; integration tests
+      against Testcontainers SeaweedFS check the attachment byte for byte; verified end to end
+      (attachment in Mailpit, and storage down → 503 → still `DRAFT` → retry → `SENT`)
 
 ## Roadmap
 
-- [ ] Wire statement attachment: store the XML in MinIO (S3-compatible) and attach it to the email
+- [x] Wire statement attachment (S3, SeaweedFS locally)
 - [ ] Redis cache-aside for loan data; Resilience4j circuit breaker
 - [ ] Load test wire generation: sequential vs parallel calls (and check the HTTP and Kafka
       producer timeouts)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
+- [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
+      uses one up, because each loan can be sent only once
 
 ## Known limitations
 
@@ -640,7 +722,6 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   same instant could both pass it
 - No transactional outbox: if wire-service crashes between claiming `QUEUED` and publishing the
   events, the submission stays `QUEUED` with no events
-- No email attachment yet: `attachmentPath` is always `null` (MinIO planned)
 - Replication factor is 1 locally (the blueprint asks for at least 3)
 - A `FAILED` delivery leaves the submission `QUEUED`; the error message is logged by wire-service,
   not stored (the blueprint's recipient table has no column for it)
@@ -654,3 +735,11 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   wait (non-blocking retry topics would avoid this)
 - Dead-letter replay is a manual command; there is no automated retry job yet
 - Every dead-lettered record logs a full stack trace at WARN, which is noisy
+- Both services use the same local S3 credentials; a real setup would give wire-service write
+  access and notification-service read-only access to the bucket
+- Events published before attachments were added (`attachmentPath: null`) are now rejected as
+  invalid, so such events still in a dead-letter topic cannot be replayed
+- Stored statements are kept forever (no lifecycle rule), and nothing deletes the object of a
+  draft that is never sent again after a failed send
+- notification-service reads the whole statement into memory; fine for small XML files, not for
+  large documents
