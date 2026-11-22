@@ -38,3 +38,15 @@ blastmail:
   idempotency:
     processing-ttl: 5m                   # a crashed attempt blocks retries at most this long
     sent-ttl: 30d                        # = DLQ retention, so replaying a DLQ event cannot email twice
+
+
+    # Wire statement attachments (D25, D26). Local = SeaweedFS from docker compose.
+storage:
+  endpoint: http://localhost:8333        # SeaweedFS; leave empty for real AWS S3
+  region: us-east-1                      # SeaweedFS ignores it, but the SDK requires one
+  access-key: dsp-local                  # local dev only; in AWS use a READ-ONLY IAM role for BlastMail
+  secret-key: dsp-local-secret
+  bucket: wire-statements                # the ONLY bucket BlastMail will read; other s3:// paths are rejected
+  path-style-access: true                # localhost:8333/wire-statements/key (no per-bucket DNS locally)
+  api-call-attempt-timeout: 2s           # one HTTP attempt
+  api-call-timeout: 5s                   # whole call incl. SDK retries (starting values, check in load test)

@@ -57,13 +57,18 @@ final class KafkaTestSupport {
         return found;
     }
 
-    /** An email-delivery event exactly as PWT publishes it (blueprint field set, ISO time, null attachment). */
-    static String emailDeliveryJson(String submissionId, String recipientId, String email) {
+    /** The s3:// path PWT puts in the event for this submission (D24). */
+    static String attachmentPath(String submissionId) {
+        return "s3://wire-statements/" + submissionId + "/LN-1001.xml";
+    }
+
+    /** An email-delivery event exactly as PWT publishes it (blueprint field set, ISO time, s3:// attachment). */
+    static String emailDeliveryJson(String submissionId, String recipientId, String email, String attachmentPath) {
         return """
                 {"eventId":"EVT-%s","eventType":"EMAIL_DELIVERY_REQUESTED","submissionId":"%s",\
                 "loanId":"LN-1001","recipientId":"%s","recipientName":"Riverbend Motors","email":"%s",\
                 "wireType":"SETTLEMENT","subject":"Settlement Wire Statement - LN-1001",\
-                "attachmentPath":null,"createdTime":"2026-11-21T20:29:00"}"""
-                .formatted(UUID.randomUUID(), submissionId, recipientId, email);
+                "attachmentPath":"%s","createdTime":"2026-11-21T20:29:00"}"""
+                .formatted(UUID.randomUUID(), submissionId, recipientId, email, attachmentPath);
     }
 }
