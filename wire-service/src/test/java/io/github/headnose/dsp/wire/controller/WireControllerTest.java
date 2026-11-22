@@ -30,6 +30,13 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import io.github.headnose.dsp.wire.controller.dto.SubmissionStatusDto;
+import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
+import io.github.headnose.dsp.wire.model.SubmissionStatus;
+import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
+import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
+import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
+import io.github.headnose.dsp.wire.service.WireSendService;
 
 @WebMvcTest(WireController.class)
 class WireControllerTest {
@@ -50,6 +57,16 @@ class WireControllerTest {
         return mockMvc.perform(post(URL)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body));
+    }
+
+    private static final String SUBMISSION_ID = "SUB-1";
+
+    // @WebMvcTest builds the real WireController, which now needs both services.
+    @MockitoBean
+    private WireSendService wireSendService;
+
+    private ResultActions postSend(String submissionId) throws Exception {
+        return mockMvc.perform(post(URL + "/{submissionId}/send", submissionId));
     }
 
     private static WireSubmission draftWithRecipients() {
@@ -165,5 +182,64 @@ class WireControllerTest {
                 .andExpect(jsonPath("$.detail").value("An unexpected error occurred."))
                 .andExpect(content().string(not(containsString("template"))))
                 .andExpect(content().string(not(containsString("IllegalStateException"))));
+    }
+
+    // ---------- send: 202 / 404 / 409 / 409 / 503 ----------
+
+    @Test
+    void sendReturns202WithQueuedStatus() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenReturn(new SubmissionStatusDto(SUBMISSION_ID, SubmissionStatus.QUEUED));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.submissionId").value(SUBMISSION_ID))
+                .andExpect(jsonPath("$.status").value("QUEUED"));
+    }
+
+    @Test
+    void sendReturns404ForUnknownSubmission() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenThrow(new SubmissionNotFoundException("Submission SUB-1 not found"));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.title").value("Submission not found"))
+                .andExpect(jsonPath("$.detail").value("Submission SUB-1 not found"));
+    }
+
+    @Test
+    void sendReturns409WhenSubmissionIsNotDraft() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenThrow(new SubmissionNotSendableException(
+                        "Submission SUB-1 is SENT; only a DRAFT can be sent"));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Submission not sendable"));
+    }
+
+    @Test
+    void sendReturns409WhenAWireForTheLoanWasAlreadySent() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenThrow(new DuplicateSubmissionException(
+                        "A SETTLEMENT wire for loan LN-1001 has already been sent"));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Wire already sent"));
+    }
+
+    @Test
+    void sendReturns503WithoutLeakingKafkaInternals() throws Exception {
+        when(wireSendService.send(SUBMISSION_ID))
+                .thenThrow(new EmailDeliveryPublishException("Kafka did not confirm email-delivery events",
+                        new RuntimeException("Topic email-delivery not present in metadata after 5000 ms")));
+
+        postSend(SUBMISSION_ID)
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.title").value("Email delivery unavailable"))
+                .andExpect(content().string(not(containsString("Kafka"))))
+                .andExpect(content().string(not(containsString("metadata"))));
     }
 }
