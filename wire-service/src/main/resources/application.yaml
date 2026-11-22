@@ -9,6 +9,20 @@ spring:
     hibernate:
       ddl-auto: validate    # Flyway creates tables; Hibernate only checks they match your entities
     open-in-view: false     # don't keep DB connections open during the web response
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      properties:
+        enable.idempotence: true
+        max.block.ms: 5000          # max wait for broker metadata before send() gives up (default 60s)
+        request.timeout.ms: 5000    # max wait for one broker response
+        delivery.timeout.ms: 10000  # total time incl. retries; must be >= linger.ms + request.timeout.ms
+        spring.json.add.type.headers: false   # JSON is the contract, not PWT's Java class names
+
+    consumer:
+      auto-offset-reset: earliest   # a NEW consumer group starts at the beginning, so no early events are skipped
 
 server:
   port: 8083
@@ -18,3 +32,7 @@ clients:
     base-url: http://localhost:8082
     connect-timeout: 2s   # time to open the TCP connection
     read-timeout: 5s      # time to wait for the response once connected
+
+topics:
+  partitions: 6
+  replication-factor: 1   # blueprint: >= 3 in production; a single local broker only supports 1

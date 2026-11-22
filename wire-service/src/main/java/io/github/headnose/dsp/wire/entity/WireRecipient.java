@@ -63,4 +63,10 @@ public class WireRecipient {
     public String getEmail() { return email; }
     public DeliveryStatus getDeliveryStatus() { return deliveryStatus; }
     public LocalDateTime getLastUpdated() { return lastUpdated; }
+
+    /** Applies BlastMail's outcome (Workflow 4). lastUpdated = when BlastMail processed it. */
+    public void recordDelivery(DeliveryStatus status, LocalDateTime processedTime) {
+        this.deliveryStatus = status;
+        this.lastUpdated = processedTime;
+    }
 }

@@ -12,7 +12,7 @@ Kafka, Redis, and resilience patterns.
 |---|---|---|---|
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
 | settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
-| wire-service | 8083 | MySQL | Generates wire statements as drafts (sending and delivery tracking planned) |
+| wire-service | 8083 | MySQL | Generates wire statements, sends them through Kafka, and tracks delivery status |
 | notification-service | 8084 | Redis | (planned) Consumes Kafka events and sends emails via Mailpit |
 
 ```
@@ -20,20 +20,16 @@ Finance Ops ──► settlement-service ──► loan-service (mock upstream)
                   │       ▲
                   ▼       │ GET settlement detail
                MongoDB    │
-Finance Ops ──► wire-service
-                  │
-                  ▼
+Finance Ops ──► wire-service ──► Kafka: email-delivery ──► notification-service (planned) ──► Mailpit
+                  │    ▲                                              │
+                  ▼    └──────────── Kafka: delivery-status ◄─────────┘
                 MySQL
-
-(planned)  wire-service ──► Kafka ──► notification-service ──► Mailpit
-                              ▲               │
-                              └───────────────┘ delivery status
 ```
 
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Docker Compose · JUnit 6 · Mockito · Testcontainers
+Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility
 
 ## Running locally
 
@@ -43,13 +39,13 @@ Prerequisites: Java 17, Maven, Docker Desktop.
 docker compose up -d          # MySQL, MongoDB, Redis, Kafka, Mailpit
 mvn clean install             # build all modules and run tests
 ```
-Integration tests start their own throwaway databases with Testcontainers (MongoDB for
-settlement-service, MySQL 8.4 for wire-service), so they need Docker running but never touch the
-local `settlement_db` or `wire_db`.
+Integration tests start their own throwaway containers with Testcontainers (MongoDB for
+settlement-service; MySQL 8.4 and Kafka 3.9.1 for wire-service), so they need Docker running but
+never touch the local `settlement_db`, `wire_db`, or Kafka topics.
 
 Then run `LoanServiceApplication`, `SettlementServiceApplication` and `WireServiceApplication`
 from your IDE. On first start, wire-service's Flyway migrations create the tables and seed data in
-the local `wire_db`.
+the local `wire_db`, and wire-service creates the Kafka topics it produces to.
 
 ### Try it
 
@@ -235,70 +231,146 @@ request is valid but names a loan that cannot be wired yet. The titles are the s
 services. The template and settlement-service calls run one after the other; a parallel version
 is planned as a load-test comparison.
 
-### wire-service data model
+### Send a wire
 
-Flyway owns the MySQL schema (`db/migration`); Hibernate runs with `ddl-auto: validate`, so the
-app refuses to start if an entity and its table disagree.
+`POST /api/v1/wires/{submissionId}/send` queues a `DRAFT` wire for email delivery. wire-service
+publishes one `EmailDeliveryEvent` per recipient to the `email-delivery` topic and moves the
+submission to `QUEUED`. The emails themselves are sent asynchronously, so the answer is
+`202 Accepted`, not `200`.
 
-| Table | Holds |
+```bash
+curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send
+```
+
+Response (`202 Accepted`):
+
+```json
+{"submissionId": "SUB-…", "status": "QUEUED"}
+```
+
+One of the four events on `email-delivery` (key = `submissionId`, no Java type headers):
+
+```json
+{
+  "eventId": "EVT-…",
+  "eventType": "EMAIL_DELIVERY_REQUESTED",
+  "submissionId": "SUB-…",
+  "loanId": "LN-1001",
+  "recipientId": "REC-…",
+  "recipientName": "Riverbend Motors",
+  "email": "accounts@riverbend-motors.example.com",
+  "wireType": "SETTLEMENT",
+  "subject": "Settlement Wire Statement - LN-1001",
+  "attachmentPath": null,
+  "createdTime": "2026-11-21T20:18:41"
+}
+```
+
+How sending stays safe:
+
+- **Only a `DRAFT` can be sent.** The status change is one atomic
+  `UPDATE … SET status = 'QUEUED' WHERE status = 'DRAFT'`, so if two users click Send at the same
+  time, exactly one wins and the other gets 409.
+- **Claim first, then publish.** `QUEUED` is committed before any event exists, so a delivery
+  result can never arrive for a submission that is still a draft.
+- **A failed publish is undone.** If Kafka does not confirm all four events (producer timeouts
+  5s / 10s), the submission goes back to `DRAFT` and the API answers 503. Retrying is safe even
+  after a partial publish, because the email consumer de-duplicates on `recipientId`.
+- **Only one wire per loan can be sent.** Generating twice still creates two drafts, but once one
+  of them is `QUEUED` or `SENT`, sending another draft for the same loan and wire type returns 409.
+
+| Status | When |
 |---|---|
-| `wire_template` | Wire templates, one row per revision; the highest `version` per wire type is used |
-| `notification_distribution` | Standing internal recipients added to every wire (audit, treasury ops) |
-| `wire_submission` | One row per generated wire: loan, wire type, status (`DRAFT` → `QUEUED` → `SENT`), merged content |
-| `wire_recipient` | The four recipients of each wire with their delivery status; one per type per wire (unique constraint) |
+| 202 | Events published, submission is `QUEUED` |
+| 404 `Submission not found` | No submission with this ID |
+| 409 `Submission not sendable` | The submission is already `QUEUED` or `SENT`, or another request is sending it |
+| 409 `Wire already sent` | Another submission for the same loan and wire type was already queued or sent |
+| 503 `Email delivery unavailable` | Kafka did not confirm the events; the submission is still a `DRAFT`, so retry later |
+| 500 | Unexpected error (details are logged, not returned) |
 
-Reference data (the settlement template `TMP-001` and the distributions `AUDIT-001` and `OPS-001`,
-with `example.com` addresses) is seeded by migration `V2`, so every environment gets it.
+Example 409:
 
-## What works so far
+```json
+{"title": "Wire already sent", "status": 409, "detail": "A SETTLEMENT wire for loan LN-1001 has already been sent", "instance": "/api/v1/wires/SUB-…/send"}
+```
 
-- [x] Multi-module Maven project and Docker Compose infrastructure
-- [x] loan-service: `GET /api/v1/loans/{loanId}` with `@WebMvcTest` tests
-- [x] settlement-service: MongoDB document model (one document per loan, Decimal128 money,
-      optimistic locking with `@Version`, audit timestamps) with `@DataMongoTest` tests
-- [x] settlement-service: concurrent loan import (`CompletableFuture` on a dedicated thread pool)
-      with per-loan outcomes and idempotent re-import
-- [x] settlement-service: settlement calculation (`PATCH`) with BigDecimal math, Bean Validation,
-      business-rule checks, injected `Clock` for value dates, and RFC 9457 error responses
-- [x] settlement-service: settlement detail (`GET`) for wire-service, including the imported
-      loan and dealer contacts, with distinct 404s for "not imported" and "not calculated"
-- [x] settlement-service: MongoDB integration tests run against Testcontainers (fresh `mongo:7`
-      per run, wired with `@ServiceConnection`), isolated from local manual testing
-- [x] wire-service: MySQL schema via Flyway (templates, distributions, submissions, recipients)
-      with seed data; JPA entities checked by `ddl-auto: validate` against Testcontainers MySQL
-- [x] wire-service: settlement-service client (`RestClient` with connect/read timeouts) that turns
-      the two 404 titles, 5xx and I/O failures into distinct exceptions; tested with
-      `MockRestServiceServer`
-- [x] wire-service: template merger that fills `{{placeholder}}` values in one regex pass,
-      XML-escapes them, and fails fast on a placeholder with no value
-- [x] wire-service: wire generation (`POST /api/v1/wires`): template + settlement detail merged
-      into a `DRAFT` submission with four recipients in one transaction, remote call kept outside
-      the transaction, RFC 9457 errors (400 / 422 / 502 / 500); verified end to end with all
-      three services
+### Delivery status
 
-## Roadmap
+wire-service listens on `delivery-status` (consumer group `pwt-delivery-status`) for the result
+of each email. For each `DeliveryStatusEvent` it updates that recipient's `delivery_status` and
+sets `last_updated` to the event's `processedTime`. When all four recipients are `SENT`, the
+submission moves from `QUEUED` to `SENT`. The recipient update and the submission update happen
+in one transaction.
 
-- [ ] Kafka: send endpoint (`POST /api/v1/wires/{submissionId}/send`), email-delivery and
-      delivery-status topics with dead-letter topics
-- [ ] notification-service: email via Mailpit, Redis idempotency keys
-- [ ] Redis cache-aside for loan data; Resilience4j circuit breaker
-- [ ] Load test wire generation: sequential vs parallel calls
-- [ ] Observability: Prometheus, Grafana, OpenTelemetry
+```json
+{
+  "eventId": "EVT-…",
+  "eventType": "EMAIL_DELIVERY_COMPLETED",
+  "submissionId": "SUB-…",
+  "loanId": "LN-1001",
+  "recipientId": "REC-…",
+  "deliveryStatus": "SENT",
+  "errorMessage": null,
+  "processedTime": "2026-11-21T20:30:00"
+}
+```
 
-## Known limitations
+MySQL after four `SENT` results:
 
-- No HTTP timeout on the loan-service call; a hung upstream can tie up import threads
-- `LocalDate` fields (`closingDate`, `valueDate`) are stored as local midnight in MongoDB and
-  can shift a day across timezones
-- FAILED import messages expose internal details (exception class, internal URL)
-- Two simultaneous imports of the same loan report FAILED instead of ALREADY_IMPORTED
-  (data stays safe because `_id` is unique)
-- Value dates skip weekends only; there is no holiday calendar (e.g. a value date can fall on
-  New Year's Day)
-- The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable
-- The API rejects amounts with more than 2 decimal places as written (`10.500` → 400), although
-  the calculator itself would accept it
-- The settlement wire template shows only the total adjustment, not each adjustment line (simple
-  `{{placeholder}}` templates cannot repeat a block per item)
-- Generating a wire twice for the same loan creates two `DRAFT` submissions; there is no
-  duplicate guard yet (planned for the send step, where duplicates would matter)
+```
++-----------+--------+
+| submission_id | status |
++-----------+--------+
+| SUB-…     | SENT   |
++-----------+--------+
++-----------+---------------------------+-----------------+---------------------+
+| recipient_id | recipient_type         | delivery_status | last_updated        |
++-----------+---------------------------+-----------------+---------------------+
+| REC-…     | AUDIT_DISTRIBUTION        | SENT            | 2026-11-21 20:30:00 |
+| REC-…     | DEALER                    | SENT            | 2026-11-21 20:30:00 |
+| REC-…     | DEALER_BANK_CONTACT       | SENT            | 2026-11-21 20:30:00 |
+| REC-…     | INTERNAL_OPS_DISTRIBUTION | SENT            | 2026-11-21 20:30:00 |
++-----------+---------------------------+-----------------+---------------------+
+```
+
+Why this is safe:
+
+- Status events are keyed by `submissionId`, so all four results for one wire land on the same
+  partition and are handled one after another. The "were all four SENT?" check cannot race.
+- Applying the same event twice gives the same result, so Kafka's at-least-once redelivery is
+  harmless. Offsets are committed only after an event is processed (or dead-lettered).
+- A `FAILED` result marks that recipient `FAILED`; the submission stays `QUEUED` (the blueprint
+  defines no failed submission status) and the error message is logged.
+
+Errors:
+
+| Problem | Retried? | Then |
+|---|---|---|
+| Invalid JSON or unknown `deliveryStatus` value | No | `delivery-status-dlq` |
+| Unknown recipient, recipient not on that submission, or a `PENDING` result | No | `delivery-status-dlq` |
+| Anything else (e.g. MySQL briefly unavailable) | 2 retries, 1 s apart | `delivery-status-dlq` |
+
+The dead-letter topic keeps the original message text unchanged, with Spring's exception headers,
+so it can be inspected and replayed.
+
+### Kafka topics
+
+| Topic | Producer | Consumer | Partitions | Retention |
+|---|---|---|---|---|
+| `email-delivery` | wire-service | notification-service (planned) | 6 | 7 days |
+| `delivery-status` | notification-service (planned) | wire-service | — (see limitations) | — |
+| `delivery-status-dlq` | wire-service | support / replay | 6 | 30 days |
+| `email-delivery-dlq` | notification-service (planned) | support / replay | — | — |
+
+Each service declares the topics it produces to. The producer uses `acks=all` with idempotence
+enabled. Replication factor is a setting (`topics.replication-factor`): 1 on the single local
+broker, 3 or more in a real cluster.
+
+### Try the Kafka flow by hand
+
+With all three services running and a calculated loan, generate a wire, then send it as shown
+above. To watch the events:
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic email-delivery --from-beginning --property
