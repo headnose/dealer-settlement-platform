@@ -12,7 +12,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Import({KafkaTestContainerConfig.class})
+@Import({KafkaTestContainerConfig.class, RedisTestContainerConfig.class, GreenMailTestConfig.class})
 @SpringBootTest
 class NotificationServiceApplicationTests {
 

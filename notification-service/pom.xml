@@ -72,6 +72,13 @@
             <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- In-JVM SMTP server for tests; 2.1.x = Jakarta Mail 2.1 / Angus (Boot 4). Not managed by Boot. -->
+        <dependency>
+            <groupId>com.icegreen</groupId>
+            <artifactId>greenmail</artifactId>
+            <version>2.1.9</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
