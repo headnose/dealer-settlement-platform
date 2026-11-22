@@ -8,6 +8,7 @@ import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
 import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublisher;
 import io.github.headnose.dsp.wire.model.SubmissionStatus;
 import io.github.headnose.dsp.wire.repository.WireSubmissionRepository;
+import io.github.headnose.dsp.wire.storage.WireStatementStorage;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
@@ -20,8 +21,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Workflow 4, PWT side: send a DRAFT wire by publishing one email-delivery
- * event per recipient. Status DRAFT -> QUEUED (D11-D13).
+ * Workflow 4, PWT side: send a DRAFT wire by storing its statement and publishing one
+ * email-delivery event per recipient. Status DRAFT -> QUEUED (D11-D13, D23).
  */
 @Service
 public class WireSendService {
@@ -34,13 +35,16 @@ public class WireSendService {
     private final WireSubmissionRepository submissionRepository;
     private final EmailDeliveryPublisher publisher;
     private final Clock clock;
+    private final WireStatementStorage statementStorage;
 
     public WireSendService(WireSubmissionRepository submissionRepository,
                            EmailDeliveryPublisher publisher,
-                           Clock clock) {
+                           Clock clock,
+                           WireStatementStorage statementStorage) {
         this.submissionRepository = submissionRepository;
         this.publisher = publisher;
         this.clock = clock;
+        this.statementStorage = statementStorage;
     }
 
     // No @Transactional on purpose (D13): the claim must COMMIT before we publish.
@@ -65,13 +69,20 @@ public class WireSendService {
                             + " has already been sent");
         }
 
-        // 4. Build all events BEFORE claiming, so a bug here can't leave the row stuck in QUEUED
+        // 4. Store the statement BEFORE claiming (D23): if storage is down nothing has changed,
+        //    so there is nothing to revert (WireStatementStorageException -> 503, still DRAFT).
+        //    A retry (or a request that later loses the claim race) overwrites the same key
+        //    with the same bytes, so uploading again is harmless.
+        String attachmentPath = statementStorage.upload(
+                submissionId, submission.getLoanId(), submission.getContent());
+
+        // 5. Build all events BEFORE claiming, so a bug here can't leave the row stuck in QUEUED
         LocalDateTime createdTime = LocalDateTime.now(clock).truncatedTo(ChronoUnit.SECONDS);
         List<EmailDeliveryEvent> events = submission.getRecipients().stream()
-                .map(recipient -> toEvent(submission, recipient, createdTime))
+                .map(recipient -> toEvent(submission, recipient, attachmentPath, createdTime))
                 .toList();
 
-        // 5. Claim: atomic DRAFT -> QUEUED. 0 rows = another request won the race.
+        // 6. Claim: atomic DRAFT -> QUEUED. 0 rows = another request won the race.
         int claimed = submissionRepository.transitionStatus(
                 submissionId, SubmissionStatus.DRAFT, SubmissionStatus.QUEUED);
         if (claimed == 0) {
@@ -79,7 +90,7 @@ public class WireSendService {
                     "Submission " + submissionId + " is already being sent");
         }
 
-        // 6. Publish; on failure put it back to DRAFT so the user can retry.
+        // 7. Publish; on failure put it back to DRAFT so the user can retry.
         //    A retry is safe: BlastMail de-duplicates on recipientId.
         try {
             publisher.publishAll(events);
@@ -88,7 +99,7 @@ public class WireSendService {
             throw e;
         }
 
-        // 7. Done: emails are now BlastMail's job (asynchronous)
+        // 8. Done: emails are now BlastMail's job (asynchronous)
         return new SubmissionStatusDto(submissionId, SubmissionStatus.QUEUED);
     }
 
@@ -106,7 +117,7 @@ public class WireSendService {
     }
 
     private EmailDeliveryEvent toEvent(WireSubmission submission, WireRecipient recipient,
-                                       LocalDateTime createdTime) {
+                                       String attachmentPath, LocalDateTime createdTime) {
         return new EmailDeliveryEvent(
                 "EVT-" + UUID.randomUUID(),
                 EmailDeliveryEvent.EMAIL_DELIVERY_REQUESTED,
@@ -117,7 +128,7 @@ public class WireSendService {
                 recipient.getEmail(),
                 submission.getWireType(),
                 "Settlement Wire Statement - " + submission.getLoanId(),
-                null,   // attachmentPath: MinIO step (D15)
+                attachmentPath,   // s3://wire-statements/{submissionId}/{loanId}.xml (D15, D24)
                 createdTime);
     }
 }

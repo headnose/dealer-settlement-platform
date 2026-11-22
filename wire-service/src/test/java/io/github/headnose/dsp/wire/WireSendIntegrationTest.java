@@ -25,11 +25,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.testcontainers.kafka.KafkaContainer;
+import software.amazon.awssdk.services.s3.S3Client;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Send a stored DRAFT through the real service, real MySQL and real Kafka, then read
  * email-delivery as raw JSON, exactly as BlastMail will. Contract test for the event format.
+ * Also checks the statement really landed in SeaweedFS at the attachmentPath (D23, D24).
  */
 @SpringBootTest
 @Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class, SeaweedFsTestContainerConfig.class})
@@ -46,6 +48,9 @@ class WireSendIntegrationTest {
 
     @Autowired
     private JsonMapper jsonMapper;
+
+    @Autowired
+    private S3Client s3Client;
 
     @Test
     void sendPublishesOneBlueprintShapedEventPerRecipientAndQueuesTheSubmission() {
@@ -82,9 +87,17 @@ class WireSendIntegrationTest {
             assertThat(event.get("loanId")).isEqualTo("LN-1001");
             assertThat(event.get("wireType")).isEqualTo("SETTLEMENT");
             assertThat(event.get("subject")).isEqualTo("Settlement Wire Statement - LN-1001");
-            assertThat(event.get("attachmentPath")).isNull();
+            assertThat(event.get("attachmentPath"))
+                    .isEqualTo("s3://wire-statements/" + submissionId + "/LN-1001.xml");
             assertThat((String) event.get("createdTime")).matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}");
         });
+
+        // The statement BlastMail will attach is really in the bucket, with the submission's content
+        String stored = s3Client.getObjectAsBytes(request -> request
+                        .bucket("wire-statements")
+                        .key(submissionId + "/LN-1001.xml"))
+                .asUtf8String();
+        assertThat(stored).isEqualTo("<settlementWire/>");
 
         // The claim really committed in MySQL
         assertThat(submissionRepository.findById(submissionId))

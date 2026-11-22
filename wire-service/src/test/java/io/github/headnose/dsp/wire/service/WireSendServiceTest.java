@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -22,6 +23,8 @@ import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublisher;
 import io.github.headnose.dsp.wire.model.SubmissionStatus;
 import io.github.headnose.dsp.wire.model.WireType;
 import io.github.headnose.dsp.wire.repository.WireSubmissionRepository;
+import io.github.headnose.dsp.wire.storage.WireStatementStorage;
+import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -34,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -42,6 +46,8 @@ class WireSendServiceTest {
 
     private static final String SUBMISSION_ID = "SUB-1";
     private static final String LOAN_ID = "LN-1001";
+    private static final String CONTENT = "<settlementWire/>";
+    private static final String ATTACHMENT_PATH = "s3://wire-statements/SUB-1/LN-1001.xml";
 
     // 19:30:45.678 UTC = 14:30:45.678 in New York (EST in November)
     private static final Clock CLOCK = Clock.fixed(
@@ -53,6 +59,9 @@ class WireSendServiceTest {
     @Mock
     private EmailDeliveryPublisher publisher;
 
+    @Mock
+    private WireStatementStorage statementStorage;
+
     @Captor
     private ArgumentCaptor<List<EmailDeliveryEvent>> eventsCaptor;
 
@@ -60,7 +69,7 @@ class WireSendServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new WireSendService(submissionRepository, publisher, CLOCK);
+        service = new WireSendService(submissionRepository, publisher, CLOCK, statementStorage);
     }
 
     @Test
@@ -72,6 +81,7 @@ class WireSendServiceTest {
         when(submissionRepository.existsByLoanIdAndWireTypeAndStatusIn(
                 LOAN_ID, WireType.SETTLEMENT, Set.of(SubmissionStatus.QUEUED, SubmissionStatus.SENT)))
                 .thenReturn(false);
+        when(statementStorage.upload(SUBMISSION_ID, LOAN_ID, CONTENT)).thenReturn(ATTACHMENT_PATH);
         when(submissionRepository.transitionStatus(
                 SUBMISSION_ID, SubmissionStatus.DRAFT, SubmissionStatus.QUEUED)).thenReturn(1);
 
@@ -79,7 +89,12 @@ class WireSendServiceTest {
 
         assertThat(result).isEqualTo(new SubmissionStatusDto(SUBMISSION_ID, SubmissionStatus.QUEUED));
 
-        verify(publisher).publishAll(eventsCaptor.capture());
+        // D23: upload -> claim -> publish, in that order
+        InOrder order = inOrder(statementStorage, submissionRepository, publisher);
+        order.verify(statementStorage).upload(SUBMISSION_ID, LOAN_ID, CONTENT);
+        order.verify(submissionRepository)
+                .transitionStatus(SUBMISSION_ID, SubmissionStatus.DRAFT, SubmissionStatus.QUEUED);
+        order.verify(publisher).publishAll(eventsCaptor.capture());
         List<EmailDeliveryEvent> events = eventsCaptor.getValue();
         assertThat(events).extracting(EmailDeliveryEvent::recipientId).containsExactly("REC-1", "REC-2");
         assertThat(events).extracting(EmailDeliveryEvent::eventId).doesNotHaveDuplicates();
@@ -93,7 +108,7 @@ class WireSendServiceTest {
         assertThat(first.email()).isEqualTo("accounts@riverbend-motors.example.com");
         assertThat(first.wireType()).isEqualTo(WireType.SETTLEMENT);
         assertThat(first.subject()).isEqualTo("Settlement Wire Statement - LN-1001");
-        assertThat(first.attachmentPath()).isNull();
+        assertThat(events).extracting(EmailDeliveryEvent::attachmentPath).containsOnly(ATTACHMENT_PATH);
         assertThat(first.createdTime()).isEqualTo(LocalDateTime.of(2026, 11, 20, 14, 30, 45));
 
         verify(submissionRepository, never())
@@ -106,7 +121,7 @@ class WireSendServiceTest {
 
         assertThatThrownBy(() -> service.send(SUBMISSION_ID))
                 .isInstanceOf(SubmissionNotFoundException.class);
-        verifyNoInteractions(publisher);
+        verifyNoInteractions(statementStorage, publisher);
     }
 
     @Test
@@ -118,7 +133,7 @@ class WireSendServiceTest {
                 .isInstanceOf(SubmissionNotSendableException.class)
                 .hasMessageContaining("QUEUED");
         verify(submissionRepository, never()).transitionStatus(any(), any(), any());
-        verifyNoInteractions(publisher);
+        verifyNoInteractions(statementStorage, publisher);
     }
 
     @Test
@@ -130,6 +145,22 @@ class WireSendServiceTest {
 
         assertThatThrownBy(() -> service.send(SUBMISSION_ID))
                 .isInstanceOf(DuplicateSubmissionException.class);
+        verify(submissionRepository, never()).transitionStatus(any(), any(), any());
+        verifyNoInteractions(statementStorage, publisher);
+    }
+
+    @Test
+    void storageFailureLeavesTheDraftUntouchedAndPublishesNothing() {
+        WireRecipient dealer = recipient("REC-1", "Riverbend Motors", "accounts@riverbend-motors.example.com");
+        WireSubmission draft = submission(SubmissionStatus.DRAFT, dealer);
+        givenFound(draft);
+        givenNoDuplicate();
+        WireStatementStorageException storageDown = new WireStatementStorageException(
+                "Failed to upload wire statement", new RuntimeException("connection refused"));
+        when(statementStorage.upload(SUBMISSION_ID, LOAN_ID, CONTENT)).thenThrow(storageDown);
+
+        assertThatThrownBy(() -> service.send(SUBMISSION_ID)).isSameAs(storageDown);
+        // D23: upload happens before the claim, so there is nothing to revert
         verify(submissionRepository, never()).transitionStatus(any(), any(), any());
         verifyNoInteractions(publisher);
     }
@@ -203,6 +234,7 @@ class WireSendServiceTest {
         lenient().when(submission.getLoanId()).thenReturn(LOAN_ID);
         lenient().when(submission.getWireType()).thenReturn(WireType.SETTLEMENT);
         lenient().when(submission.getStatus()).thenReturn(status);
+        lenient().when(submission.getContent()).thenReturn(CONTENT);
         lenient().when(submission.getRecipients()).thenReturn(List.of(recipients));
         return submission;
     }
