@@ -11,7 +11,7 @@ Kafka, Redis, S3-compatible object storage, and resilience patterns.
 | Service | Port | Database | Role |
 |---|---|---|---|
 | loan-service | 8081 | — (in-memory sample data) | Mock upstream system that returns closed loans |
-| settlement-service | 8082 | MongoDB | Imports loans concurrently and calculates settlements |
+| settlement-service | 8082 | MongoDB, Redis (cache) | Imports loans concurrently, calculates settlements, and caches the settlement detail |
 | wire-service | 8083 | MySQL, S3 (SeaweedFS) | Generates wire statements, stores them in S3, sends them through Kafka, and tracks delivery status |
 | notification-service | 8084 | Redis (its own instance), S3 (read) | Consumes email requests from Kafka, downloads the statement, emails it as an attachment over SMTP, and reports each result back |
 
@@ -19,7 +19,7 @@ Kafka, Redis, S3-compatible object storage, and resilience patterns.
 Finance Ops ──► settlement-service ──► loan-service (mock upstream)
                   │       ▲
                   ▼       │ GET settlement detail
-               MongoDB    │
+       MongoDB + Redis    │
 Finance Ops ──► wire-service ──► Kafka: email-delivery ──► notification-service ──► SMTP (Mailpit)
                   │  │  ▲                                     │  │    │
                   │  │  └────────── Kafka: delivery-status ◄──┘  │    ▼
@@ -46,13 +46,13 @@ mvn clean install             # build all modules and run tests
 |---|---|---|
 | `mysql` | 3306 | wire-service |
 | `mongodb` | 27017 | settlement-service |
-| `redis` | 6379 | settlement-service cache (planned) |
+| `redis` | 6379 | settlement-service cache (settlement detail) |
 | `blastmail-redis` | 6380 | notification-service idempotency keys |
 | `kafka` | 9092 | wire-service, notification-service |
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
 
-Integration tests start their own throwaway containers with Testcontainers (MongoDB for
+Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
 and SeaweedFS for notification-service, plus GreenMail as an in-process SMTP server), so they need
 Docker running but never touch the local databases, Kafka topics, bucket or Mailpit.
@@ -259,6 +259,85 @@ Both 404 cases return the same status, so clients tell them apart by the Problem
 The `loan` object is not in the blueprint's `SettlementDetailDto` tree, but the blueprint's
 example settlement document (described as the data returned by `SettlementDetailDto`) includes
 it. It is included so wire-service gets the dealer's name and emails in the same call.
+
+### Settlement detail cache (Redis)
+
+The blueprint caches "loan metadata" in Redis with cache-aside: read Redis first, on a miss read
+MongoDB and fill the cache, invalidate on write. In this project the loan, settlement, payment and
+adjustments live in **one** MongoDB document per loan, and each endpoint reads that document once
+by `_id`. Caching only the loan part would save no reads at all (GET still needs the settlement,
+PATCH still needs the version for optimistic locking). So the cache holds what GET returns:
+
+- **What is cached:** the settlement detail of a `CALCULATED` loan, under `lsc:loan:{loanId}`, for
+  30 minutes (`settlement-cache.ttl`, the low end of the blueprint's 30-60 minutes, because stale
+  settlement data is a compliance risk). The two 404 cases are never cached.
+- **Cache format is not the API DTO.** `PaymentDto` marks `beneficiaryBank` and `valueDate` as
+  read-only so clients cannot set them, which also means JSON read back into it loses them. A
+  cached DTO would have served wire statements without the bank or value date, and only on cache
+  hits. The cache stores a snapshot of the stored model (`CachedSettlementDetail`) instead, and
+  both hit and miss build the response through the same mapping.
+- **Invalidation:** `PATCH` deletes the key after the save succeeded; a failed save (409) deletes
+  nothing. Import deletes it too, defensively: a document removed directly in MongoDB and imported
+  again must not bring back the old cached settlement. Writes never put values into Redis; only
+  reads fill it, so two concurrent writes cannot leave the older value cached.
+- **Redis down never fails a request:** every Redis error is logged at WARN and treated as a miss
+  (read) or ignored (write, delete). Lettuce timeouts are lowered to 500ms (`spring.data.redis.timeout`
+  / `connect-timeout`; the defaults would make a dead cache very slow). Starting values.
+- **Eviction and persistence are infrastructure:** the compose Redis runs with `--maxmemory 64mb
+  --maxmemory-policy allkeys-lru` (TTL for staleness, LRU for memory pressure) and `--save ""`
+  (no snapshots: the cache is rebuilt from MongoDB). In AWS this would be an ElastiCache parameter
+  group.
+- **Hand-written cache-aside**, not `@Cacheable`: a Redis outage would throw through `@Cacheable`
+  without extra error handling, and the explicit code makes the order (save, then delete) visible
+  and testable.
+- **Not measured yet:** a single indexed MongoDB read is already fast; whether the cache helps is
+  for the load test to show.
+
+A real run (`redis-cli MONITOR` in one tab, LN-1001 already imported):
+
+| Time | Request | Redis commands | Result |
+|---|---|---|---|
+| 13:40:11 | `PATCH` (holdback 500, doc fee 150) | `DEL lsc:loan:LN-1001` | net 27850.00 |
+| 13:41:05 | `GET` | `GET`, then `SET … EX 1800` (miss) | |
+| 13:43:01 | `GET` | `GET` only (hit) | response identical to the miss; `TTL` 1673 |
+| 13:44:19 | `PATCH` (doc fee 150) | `DEL` | net 28350.00 |
+| 13:44:26 | `GET` | `GET`, then `SET` (miss) | net 28350.00 |
+
+The cached value contains the read-only fields and the money scale:
+
+```
+"payment":{"paymentMethod":"WIRE","currency":"USD","beneficiaryBank":"Riverbend Community Bank","valueDate":"2026-11-24"}
+```
+
+With `docker compose stop redis`, the GET still answered from MongoDB (`200` in 0.008s, one local
+run where the stopped container refuses connections at once; a network partition would be bounded
+by the 500ms timeout instead), and settlement-service logged:
+
+```
+WARN ... SettlementDetailCache : Settlement cache read failed for loan LN-1001, reading MongoDB: Redis exception
+WARN ... SettlementDetailCache : Settlement cache write failed for loan LN-1001: Redis exception
+```
+
+A `PATCH` while Redis was down (holdback 1000, net 27500.00) succeeded and logged:
+
+```
+WARN ... SettlementDetailCache : Settlement cache evict failed, stale entry possible until TTL: key lsc:loan:LN-1001: Redis exception
+```
+
+That run still used Redis's default snapshots. After `docker compose start redis`, Lettuce
+reconnected by itself and the GET returned **28350.00** from the restored cache while MongoDB held
+27500.00: the stale entry the WARN line warns about. `redis-cli DEL lsc:loan:LN-1001` (the key
+from the log line) fixed it. Turning snapshots off (`--save ""`) means a Redis restart now empties
+the cache, but a short network problem without a restart can still leave such an entry until its
+TTL (see Known limitations).
+
+Tests: `SettlementDetailCacheIntegrationTest` runs against Testcontainers Redis (round trip keeps
+every field including `beneficiaryBank`, `valueDate` and the `BigDecimal` scale; key prefix and the
+configured TTL; miss; evict; an unreadable entry is a miss and is deleted);
+`SettlementDetailCacheRedisDownTest` points at a port where nothing listens and checks that get,
+put and evict all fail open; `SettlementServiceTest` and `LoanImportServiceTest` check that a hit
+never reads MongoDB, a miss fills the cache, a not-calculated loan is not cached, and the delete
+comes after the save.
 
 ### Generate a wire
 
@@ -766,12 +845,16 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
       loan-service call, a separate `LOAN_SERVICE_UNAVAILABLE` import outcome, and `FAILED`
       messages without internal details; verified end to end (loan-service down → breaker open →
       half-open trial calls → closed)
+- [x] settlement-service: Redis cache-aside for the settlement detail (snapshot of the stored data,
+      delete after every write, fail-open when Redis is down, TTL + LRU); integration tests against
+      Testcontainers Redis; verified end to end with `redis-cli MONITOR` (miss, hit, delete on
+      PATCH, Redis down, and a stale entry after a failed delete)
 
 ## Roadmap
 
 - [x] Wire statement attachment (S3, SeaweedFS locally)
 - [x] Resilience4j circuit breaker and HTTP timeouts on the loan-service call
-- [ ] Redis cache-aside for loan data
+- [x] Redis cache-aside for the settlement detail
 - [ ] Load test wire generation: sequential vs parallel calls (and check the HTTP and Kafka
       producer timeouts)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
@@ -793,6 +876,16 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   each one has to see the failures itself before it opens
 - Circuit breaker state changes are not logged or exposed as metrics yet (planned with
   observability)
+- The cache holds the whole settlement detail, not only loan metadata as the blueprint says,
+  because loan and settlement share one MongoDB document (caching only the loan saves no read)
+- If deleting a cache entry fails (Redis unreachable during a `PATCH`), the old settlement can be
+  served until the 30-minute TTL ends; the WARN line names the key to delete by hand (reproduced
+  locally, see above)
+- Cache-aside race: a slow `GET` that read MongoDB just before a `PATCH` can put the old value back
+  after the `PATCH` deleted it; the TTL limits how long it stays
+- No stampede protection: when a popular entry expires, concurrent `GET`s all read MongoDB
+- Whether the cache makes `GET` faster has not been measured yet (load test)
+- Lettuce logs each failed reconnect with a full stack trace at WARN while Redis is down (noisy)
 - Value dates skip weekends only; there is no holiday calendar (e.g. a value date can fall on
   New Year's Day)
 - The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable

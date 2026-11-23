@@ -1,5 +1,6 @@
 package io.github.headnose.dsp.settlement.service;
 
+import io.github.headnose.dsp.settlement.cache.SettlementDetailCache;
 import io.github.headnose.dsp.settlement.client.LoanServiceClient;
 import io.github.headnose.dsp.settlement.client.LoanServiceUnavailableException;
 import io.github.headnose.dsp.settlement.client.dto.LoanDto;
@@ -27,13 +28,16 @@ public class LoanImportService {
 
     private final LoanServiceClient loanServiceClient;
     private final LoanSettlementRepository repository;
+    private final SettlementDetailCache cache;
     private final Executor importExecutor;
 
     public LoanImportService(LoanServiceClient loanServiceClient,
                              LoanSettlementRepository repository,
+                             SettlementDetailCache cache,
                              @Qualifier("loanImportExecutor") Executor importExecutor) {
         this.loanServiceClient = loanServiceClient;
         this.repository = repository;
+        this.cache = cache;
         this.importExecutor = importExecutor;
     }
 
@@ -82,6 +86,9 @@ public class LoanImportService {
 
         // Rule 4: save a new settlement document
         repository.save(LoanSettlementDocument.imported(loan.toLoanInfo()));
+        // C6, defensive: a new document has no cache entry, unless an old document for this loan was
+        // deleted directly in MongoDB (e.g. local test data reset). Never serve that old settlement.
+        cache.evict(loanId);
         return new ImportResult(loanId, ImportOutcome.IMPORTED, "Imported");
     }
 
