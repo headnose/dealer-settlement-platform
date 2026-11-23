@@ -47,3 +47,10 @@ storage:
   path-style-access: true             # localhost:8333/wire-statements/key (no per-bucket DNS locally)
   api-call-attempt-timeout: 2s        # one HTTP attempt
   api-call-timeout: 5s                # whole call incl. SDK retries (starting values, check in load test)
+
+# Actuator: health + metrics only (load test: Hikari pool, server and repository timings).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics   # never "*": env/configprops/heapdump would expose secrets
