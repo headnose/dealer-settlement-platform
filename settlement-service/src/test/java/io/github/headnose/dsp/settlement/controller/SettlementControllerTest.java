@@ -1,5 +1,6 @@
 package io.github.headnose.dsp.settlement.controller;
 
+import io.github.headnose.dsp.settlement.cache.CachedSettlementDetail;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
@@ -190,7 +191,8 @@ class SettlementControllerTest {
 
     @Test
     void getReturns200WithSettlementDetailInBlueprintShape() throws Exception {
-        when(settlementService.getCalculatedSettlement(LOAN_ID)).thenReturn(calculatedDocument());
+        when(settlementService.getSettlementDetail(LOAN_ID))
+                .thenReturn(CachedSettlementDetail.from(calculatedDocument()));
 
         getSettlement()
                 .andExpect(status().isOk())
@@ -217,7 +219,7 @@ class SettlementControllerTest {
 
     @Test
     void getReturns404WhenLoanNotImported() throws Exception {
-        when(settlementService.getCalculatedSettlement(LOAN_ID))
+        when(settlementService.getSettlementDetail(LOAN_ID))
                 .thenThrow(new LoanNotImportedException(LOAN_ID));
 
         getSettlement()
@@ -229,7 +231,7 @@ class SettlementControllerTest {
 
     @Test
     void getReturns404WhenSettlementNotCalculated() throws Exception {
-        when(settlementService.getCalculatedSettlement(LOAN_ID))
+        when(settlementService.getSettlementDetail(LOAN_ID))
                 .thenThrow(new SettlementNotCalculatedException(LOAN_ID));
 
         getSettlement()
