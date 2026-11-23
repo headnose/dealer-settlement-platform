@@ -19,6 +19,9 @@
 
     <properties>
         <java.version>17</java.version>
+        <!-- AWS SDK for Java v2: S3 client for wire statement attachments (wire-service uploads,
+             notification-service downloads). Not managed by Spring Boot, so we import its BOM. -->
+        <aws-sdk.version>2.57.3</aws-sdk.version>
     </properties>
 
     <modules>
@@ -27,4 +30,17 @@
         <module>wire-service</module>
         <module>notification-service</module>
     </modules>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Pins every software.amazon.awssdk artifact to one version; modules omit <version>. -->
+            <dependency>
+                <groupId>software.amazon.awssdk</groupId>
+                <artifactId>bom</artifactId>
+                <version>${aws-sdk.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 </project>

@@ -7,6 +7,7 @@ import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
 import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
 import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
 import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
+import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -24,7 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13). */
+/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13, D23). */
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
@@ -91,6 +92,17 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
                 "Could not queue the wire for delivery. It is still a DRAFT; try again later.");
         problem.setTitle("Email delivery unavailable");
+        return problem;
+    }
+
+    // ---------- 503: the wire statement could not be stored (D23) ----------
+
+    @ExceptionHandler(WireStatementStorageException.class)
+    public ProblemDetail handleWireStatementStorageUnavailable(WireStatementStorageException e) {
+        log.warn("wire statement upload failed: {}", e.getMessage(), e);
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "Could not store the wire statement. It is still a DRAFT; try again later.");
+        problem.setTitle("Wire statement storage unavailable");
         return problem;
     }
 
