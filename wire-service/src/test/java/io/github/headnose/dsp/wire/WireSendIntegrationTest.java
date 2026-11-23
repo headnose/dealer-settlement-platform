@@ -32,6 +32,10 @@ import tools.jackson.databind.json.JsonMapper;
  * Send a stored DRAFT through the real service, real MySQL and real Kafka, then read
  * email-delivery as raw JSON, exactly as BlastMail will. Contract test for the event format.
  * Also checks the statement really landed in SeaweedFS at the attachmentPath (D23, D24).
+ *
+ * <p>Unique loanId per run: the MySQL container is shared with other @SpringBootTest classes
+ * (e.g. DeliveryStatusIntegrationTest), and the duplicate guard (D12) rejects a second send for
+ * a loan that already has a QUEUED/SENT submission, so a fixed loanId depends on test order.
  */
 @SpringBootTest
 @Import({MySqlTestContainerConfig.class, KafkaTestContainerConfig.class, SeaweedFsTestContainerConfig.class})
@@ -54,7 +58,8 @@ class WireSendIntegrationTest {
 
     @Test
     void sendPublishesOneBlueprintShapedEventPerRecipientAndQueuesTheSubmission() {
-        WireSubmission draft = savedDraftWithFourRecipients();
+        String loanId = "LN-IT-" + UUID.randomUUID().toString().substring(0, 8);
+        WireSubmission draft = savedDraftWithFourRecipients(loanId);
         String submissionId = draft.getSubmissionId();
         List<String> recipientIds = draft.getRecipients().stream()
                 .map(WireRecipient::getRecipientId)
@@ -84,18 +89,18 @@ class WireSendIntegrationTest {
         assertThat(events).allSatisfy(event -> {
             assertThat(event.get("eventType")).isEqualTo("EMAIL_DELIVERY_REQUESTED");
             assertThat(event.get("submissionId")).isEqualTo(submissionId);
-            assertThat(event.get("loanId")).isEqualTo("LN-1001");
+            assertThat(event.get("loanId")).isEqualTo(loanId);
             assertThat(event.get("wireType")).isEqualTo("SETTLEMENT");
-            assertThat(event.get("subject")).isEqualTo("Settlement Wire Statement - LN-1001");
+            assertThat(event.get("subject")).isEqualTo("Settlement Wire Statement - " + loanId);
             assertThat(event.get("attachmentPath"))
-                    .isEqualTo("s3://wire-statements/" + submissionId + "/LN-1001.xml");
+                    .isEqualTo("s3://wire-statements/" + submissionId + "/" + loanId + ".xml");
             assertThat((String) event.get("createdTime")).matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}");
         });
 
         // The statement BlastMail will attach is really in the bucket, with the submission's content
         String stored = s3Client.getObjectAsBytes(request -> request
                         .bucket("wire-statements")
-                        .key(submissionId + "/LN-1001.xml"))
+                        .key(submissionId + "/" + loanId + ".xml"))
                 .asUtf8String();
         assertThat(stored).isEqualTo("<settlementWire/>");
 
@@ -106,8 +111,8 @@ class WireSendIntegrationTest {
                 .isEqualTo(SubmissionStatus.QUEUED);
     }
 
-    private WireSubmission savedDraftWithFourRecipients() {
-        WireSubmission draft = WireSubmission.draft("LN-1001", WireType.SETTLEMENT,
+    private WireSubmission savedDraftWithFourRecipients(String loanId) {
+        WireSubmission draft = WireSubmission.draft(loanId, WireType.SETTLEMENT,
                 "<settlementWire/>", LocalDateTime.of(2026, 11, 21, 14, 30, 25));
         draft.addRecipient(RecipientType.DEALER,
                 "Riverbend Motors", "accounts@riverbend-motors.example.com");
