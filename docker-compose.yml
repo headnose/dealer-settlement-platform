@@ -74,6 +74,20 @@ services:
       - "1025:1025"                    # SMTP (apps send here)
       - "8025:8025"                    # Web UI: http://localhost:8025
 
+  # S3-compatible object storage for wire statement attachments (replaces the planned MinIO,
+  # whose community images are no longer published). The image runs `weed mini` by default:
+  # master + volume + filer + S3 gateway in one process. No volume: a restart empties it (dev only).
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.47
+    container_name: dsp-seaweedfs
+    environment:
+      AWS_ACCESS_KEY_ID: dsp-local          # local dev credentials; setting them turns S3 auth ON
+      AWS_SECRET_ACCESS_KEY: dsp-local-secret
+      S3_BUCKET: wire-statements            # bucket created on startup (infra owns buckets, not the apps)
+    ports:
+      - "8333:8333"                    # S3 API (apps and curl talk to this)
+      - "23646:23646"                  # Admin UI: http://localhost:23646
+
 volumes:
   mysql-data:
   mongo-data:
