@@ -52,6 +52,12 @@
             <version>${resilience4j.version}</version>
         </dependency>
 
+        <!-- StringRedisTemplate for the settlement detail cache (C3, C6). LSC's own Redis on 6379. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-mongodb-test</artifactId>
