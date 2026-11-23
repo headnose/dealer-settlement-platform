@@ -29,10 +29,13 @@ services:
     volumes:
       - mongo-data:/data/db
 
-  # Cache for settlement-service (LSC cache-aside, planned)
+    # Cache for settlement-service (LSC cache-aside: GET settlement detail, C6)
   redis:
     image: redis:7-alpine
     container_name: dsp-redis
+    # C4: eviction is infra, not app config. maxmemory is required: without it (default 0 = no limit)
+    # the policy never kicks in. 64mb is a local starting value. AWS: ElastiCache parameter group.
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
       - "6379:6379"
 
