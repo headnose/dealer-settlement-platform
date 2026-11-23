@@ -44,6 +44,18 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<!-- Actuator: /actuator/health and /actuator/metrics (Hikari pool, server and repository
+             timings for the load test). Exposure limited to health,metrics in application.yaml. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<!-- Boot 4: Micrometer metrics are a separate module. Without this starter the metrics
+             endpoint does not exist, so exposing it in YAML has no effect. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-micrometer-metrics</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.flywaydb</groupId>
 			<artifactId>flyway-mysql</artifactId>
@@ -100,8 +112,8 @@
 		</dependency>
 
 		<!-- S3 client for uploading wire statements (D22). Version comes from the AWS BOM in the
-		     root pom. The sync Apache HTTP client stays (the SDK's default); the async Netty client
-		     is excluded because we never use S3AsyncClient. -->
+             root pom. The sync Apache HTTP client stays (the SDK's default); the async Netty client
+             is excluded because we never use S3AsyncClient. -->
 		<dependency>
 			<groupId>software.amazon.awssdk</groupId>
 			<artifactId>s3</artifactId>
