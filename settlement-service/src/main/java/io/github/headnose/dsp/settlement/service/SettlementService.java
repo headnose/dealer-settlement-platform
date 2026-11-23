@@ -1,5 +1,7 @@
 package io.github.headnose.dsp.settlement.service;
 
+import io.github.headnose.dsp.settlement.cache.CachedSettlementDetail;
+import io.github.headnose.dsp.settlement.cache.SettlementDetailCache;
 import io.github.headnose.dsp.settlement.controller.dto.AdjustmentDto;
 import io.github.headnose.dsp.settlement.controller.dto.PaymentDto;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
@@ -11,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class SettlementService {
@@ -18,13 +21,16 @@ public class SettlementService {
     private final LoanSettlementRepository repository;
     private final SettlementCalculator calculator;
     private final Clock clock;
+    private final SettlementDetailCache cache;
 
     public SettlementService(LoanSettlementRepository repository,
                              SettlementCalculator calculator,
-                             Clock clock) {
+                             Clock clock,
+                             SettlementDetailCache cache) {
         this.repository = repository;
         this.calculator = calculator;
         this.clock = clock;
+        this.cache = cache;
     }
 
     /**
@@ -55,7 +61,25 @@ public class SettlementService {
                 BusinessDays.nextBusinessDay(LocalDate.now(clock)));
 
         doc.applySettlement(payment, adjustments, settlement);
-        return repository.save(doc);
+        LoanSettlementDocument saved = repository.save(doc);
+        // C6: delete AFTER the write succeeded, so the next GET reads the new settlement from MongoDB.
+        // A failed save (e.g. optimistic lock) changed nothing, so it evicts nothing.
+        cache.evict(loanId);
+        return saved;
+    }
+
+    /**
+     * GET settlement detail, cache-aside (C6): Redis first; on a miss read MongoDB and fill the cache.
+     * Only CALCULATED settlements are cached; the two 404 cases are never cached (C5).
+     */
+    public CachedSettlementDetail getSettlementDetail(String loanId) {
+        Optional<CachedSettlementDetail> cached = cache.get(loanId);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        CachedSettlementDetail detail = CachedSettlementDetail.from(getCalculatedSettlement(loanId));
+        cache.put(detail);
+        return detail;
     }
 
     public LoanSettlementDocument getCalculatedSettlement(String loanId) {

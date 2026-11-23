@@ -1,5 +1,7 @@
 package io.github.headnose.dsp.settlement.service;
 
+import io.github.headnose.dsp.settlement.cache.CachedSettlementDetail;
+import io.github.headnose.dsp.settlement.cache.SettlementDetailCache;
 import io.github.headnose.dsp.settlement.controller.dto.AdjustmentDto;
 import io.github.headnose.dsp.settlement.controller.dto.PaymentDto;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
@@ -12,6 +14,7 @@ import io.github.headnose.dsp.settlement.repository.LoanSettlementRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -28,6 +31,7 @@ import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -44,11 +48,14 @@ class SettlementServiceTest {
     @Mock
     private LoanSettlementRepository repository;
 
+    @Mock
+    private SettlementDetailCache cache;
+
     private SettlementService service;
 
     @BeforeEach
     void setUp() {
-        service = new SettlementService(repository, new SettlementCalculator(), FRIDAY_MORNING_NY);
+        service = new SettlementService(repository, new SettlementCalculator(), FRIDAY_MORNING_NY, cache);
     }
 
     // ---------- helpers ----------
@@ -99,7 +106,7 @@ class SettlementServiceTest {
         // 02:00 UTC on Friday is still 22:00 on THURSDAY in New York,
         // so the value date is Friday 05-15. A UTC "today" would give Monday 05-18.
         Clock thursdayNightNy = Clock.fixed(Instant.parse("2026-05-15T02:00:00Z"), NEW_YORK);
-        service = new SettlementService(repository, new SettlementCalculator(), thursdayNightNy);
+        service = new SettlementService(repository, new SettlementCalculator(), thursdayNightNy, cache);
         givenImportedLoan();
         givenSaveReturnsDocument();
 
@@ -151,6 +158,60 @@ class SettlementServiceTest {
 
         assertThatThrownBy(() -> service.calculate(LOAN_ID, request("USD")))
                 .isInstanceOf(OptimisticLockingFailureException.class);
+        verify(cache, never()).evict(any());
+    }
+
+    // ---------- cache (C6) ----------
+
+    private static LoanSettlementDocument calculatedDocument() {
+        LoanSettlementDocument doc = LoanSettlementDocument.imported(closedLoan());
+        doc.applySettlement(wirePayment(), List.of(), settlement("28500.00", "0.00", "28500.00"));
+        return doc;
+    }
+
+    @Test
+    void calculateEvictsCacheAfterSave() {
+        givenImportedLoan();
+        givenSaveReturnsDocument();
+
+        service.calculate(LOAN_ID, request("USD"));
+
+        // Order matters: evicting before the save could let a GET refill the cache with the old value
+        InOrder order = inOrder(repository, cache);
+        order.verify(repository).save(any(LoanSettlementDocument.class));
+        order.verify(cache).evict(LOAN_ID);
+    }
+
+    @Test
+    void getSettlementDetailHitDoesNotReadMongo() {
+        CachedSettlementDetail cached = CachedSettlementDetail.from(calculatedDocument());
+        when(cache.get(LOAN_ID)).thenReturn(Optional.of(cached));
+
+        assertThat(service.getSettlementDetail(LOAN_ID)).isSameAs(cached);
+        verify(repository, never()).findById(any());
+        verify(cache, never()).put(any());
+    }
+
+    @Test
+    void getSettlementDetailMissReadsMongoAndFillsCache() {
+        LoanSettlementDocument doc = calculatedDocument();
+        when(cache.get(LOAN_ID)).thenReturn(Optional.empty());
+        when(repository.findById(LOAN_ID)).thenReturn(Optional.of(doc));
+
+        CachedSettlementDetail result = service.getSettlementDetail(LOAN_ID);
+
+        assertThat(result).isEqualTo(CachedSettlementDetail.from(doc));
+        verify(cache).put(result);
+    }
+
+    @Test
+    void getSettlementDetailNotCalculatedIsNotCached() {
+        when(cache.get(LOAN_ID)).thenReturn(Optional.empty());
+        givenImportedLoan();
+
+        assertThatThrownBy(() -> service.getSettlementDetail(LOAN_ID))
+                .isInstanceOf(SettlementNotCalculatedException.class);
+        verify(cache, never()).put(any());
     }
 
     // ---------- getCalculatedSettlement ----------
