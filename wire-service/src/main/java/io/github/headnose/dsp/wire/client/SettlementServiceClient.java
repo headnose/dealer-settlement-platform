@@ -13,7 +13,11 @@ import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
 
-/** Calls settlement-service (blueprint: LSC) for the settlement detail of a loan. */
+/**
+ * Calls settlement-service (blueprint: LSC) for the settlement detail of a loan.
+ * Built from Boot's auto-configured RestClient.Builder so every call is observed
+ * (metric http.client.requests; traces later). Timeouts are still our own (2s/5s).
+ */
 @Component
 public class SettlementServiceClient {
 
@@ -23,12 +27,14 @@ public class SettlementServiceClient {
 
     private final RestClient restClient;
 
+    /** Boot's builder is prototype-scoped: this client gets its own copy, so setting the factory affects no one else. */
     @Autowired
     public SettlementServiceClient(
+            RestClient.Builder builder,
             @Value("${clients.settlement-service.base-url}") String baseUrl,
             @Value("${clients.settlement-service.connect-timeout}") Duration connectTimeout,
             @Value("${clients.settlement-service.read-timeout}") Duration readTimeout) {
-        this(RestClient.builder().requestFactory(requestFactory(connectTimeout, readTimeout)), baseUrl);
+        this(builder.requestFactory(requestFactory(connectTimeout, readTimeout)), baseUrl);
     }
 
     /** For tests: the builder may already be bound to a MockRestServiceServer. */
