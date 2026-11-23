@@ -5,7 +5,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 
 @SpringBootTest
-@Import(MongoTestContainerConfig.class)
+@Import({MongoTestContainerConfig.class, RedisTestContainerConfig.class})
 class SettlementServiceApplicationTests {
 
 	@Test
