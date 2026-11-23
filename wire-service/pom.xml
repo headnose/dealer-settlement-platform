@@ -56,6 +56,12 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-micrometer-metrics</artifactId>
 		</dependency>
+		<!-- Boot 4: the auto-configured RestClient.Builder (with its observation = http.client.requests
+             metric) lives in spring-boot-restclient. SettlementServiceClient is built from it. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-restclient</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.flywaydb</groupId>
 			<artifactId>flyway-mysql</artifactId>
