@@ -30,7 +30,7 @@ Finance Ops ──► wire-service ──► Kafka: email-delivery ──► not
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Spring Mail · AWS SDK for Java v2 (S3) · SeaweedFS · Docker Compose · JUnit 6 · Mockito ·
+Spring Mail · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j · Docker Compose · JUnit 6 · Mockito ·
 Testcontainers · Awaitility · GreenMail
 
 ## Running locally
@@ -92,6 +92,80 @@ Example response (one result per loan):
   {"loanId": "NOPE",    "outcome": "NOT_FOUND",  "message": "Loan not found in loan-service"}
 ]
 ```
+
+The request itself answers `200` even when some loans could not be imported: each loan gets its
+own outcome.
+
+| Outcome | When |
+|---|---|
+| `IMPORTED` | Fetched from loan-service and saved |
+| `ALREADY_IMPORTED` | A settlement document already exists for this loan (no call to loan-service) |
+| `NOT_FOUND` | loan-service answered 404, and only then |
+| `NOT_CLOSED` | The loan exists but is not `CLOSED`, so it cannot be settled |
+| `LOAN_SERVICE_UNAVAILABLE` | loan-service timed out, refused the connection, answered 5xx, or the circuit breaker is open; try again later |
+| `FAILED` | Unexpected error (e.g. a database error or an empty answer from loan-service); the message is always `Import failed unexpectedly` and the cause is logged, not returned |
+
+### Loan-service calls: timeouts and circuit breaker
+
+The import calls loan-service once per loan, on a pool of at most 10 threads. The blueprint's
+debugging scenario describes what goes wrong without protection: the upstream ran out of
+connections during a busy closing window, and the calling code treated the unresponsive service
+as an empty result instead of a failure. Here:
+
+- **Timeouts:** connect 2s, read 5s (`clients.loan-service.connect-timeout` / `read-timeout`),
+  starting values to check in the load test. A hung loan-service now fails a call after 5s instead
+  of holding an import thread forever. The read timeout limits the wait between bytes, not the
+  whole response.
+- **Circuit breaker** (Resilience4j, instance `loanService`, settings under
+  `resilience4j.circuitbreaker.instances.loanService`): it looks at the last 10 calls and, once at
+  least 5 were made, opens when 50% or more failed. While open, calls fail at once without any HTTP
+  request. After 10s it lets 2 trial calls through (half-open); if they succeed it closes again,
+  otherwise it opens again.
+- **Only an unhealthy upstream counts as a failure:** timeouts, connection errors and 5xx. A 404 is
+  a normal answer (`NOT_FOUND`), so a batch of unknown loan IDs can never open the breaker.
+- **Unavailable is never reported as not found.** Only a 404 means `NOT_FOUND`; an unavailable
+  loan-service gives `LOAN_SERVICE_UNAVAILABLE`, and an empty `200` body gives `FAILED`.
+- **No retry and no cached fallback.** Retrying would add load to an upstream that is already
+  struggling, and a loan that was never imported has no cached data to fall back on (the blueprint
+  says the same).
+
+A real run with loan-service stopped, importing six unknown loan IDs (so each one reaches the
+client):
+
+```bash
+curl -s -X POST localhost:8082/api/v1/imports -H 'Content-Type: application/json' \
+  -d '{"loanIds":["LN-9001","LN-9002","LN-9003","LN-9004","LN-9005","LN-9006"]}'
+```
+
+The same batch twice in a row returned six of these each time (no exception text):
+
+```json
+{"loanId":"LN-9001","outcome":"LOAN_SERVICE_UNAVAILABLE","message":"Loan service temporarily unavailable"}
+```
+
+The six refused connections of the first batch opened the breaker. loan-service was then started
+(19:59:03); its own log shows the first request arriving at 19:59:53, so none of the earlier
+calls reached it. The next batch, at 19:59:53, met the breaker in its half-open state: exactly two
+trial calls went through and got a real 404, and the other four were rejected without an HTTP call:
+
+```json
+[{"loanId":"LN-9001","outcome":"LOAN_SERVICE_UNAVAILABLE","message":"Loan service temporarily unavailable"},
+ {"loanId":"LN-9002","outcome":"LOAN_SERVICE_UNAVAILABLE","message":"Loan service temporarily unavailable"},
+ {"loanId":"LN-9003","outcome":"NOT_FOUND","message":"Loan not found in loan-service"},
+ {"loanId":"LN-9004","outcome":"NOT_FOUND","message":"Loan not found in loan-service"},
+ {"loanId":"LN-9005","outcome":"LOAN_SERVICE_UNAVAILABLE","message":"Loan service temporarily unavailable"},
+ {"loanId":"LN-9006","outcome":"LOAN_SERVICE_UNAVAILABLE","message":"Loan service temporarily unavailable"}]
+```
+
+The two successful trials closed the breaker. The same batch again returned `NOT_FOUND` for all
+six, and `LN-1003` / `LN-2002` returned `NOT_CLOSED` (`Loan status is ACTIVE, expected CLOSED` /
+`... CANCELLED ...`).
+
+Tests: `LoanServiceClientTest` runs the client against a JDK `HttpServer` (200, 404, empty body,
+500, and a slow answer that times out); `LoanServiceCircuitBreakerTest` gets the client from Spring
+so the breaker proxy is active, and checks that five 500s open it and that the sixth call fails
+without reaching the server, while ten 404s leave it closed; `LoanImportServiceTest` checks the
+outcomes above.
 
 ### Calculate a settlement
 
@@ -688,11 +762,16 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
       attachment, with `FAILED` + DLQ for a missing or unreachable statement; integration tests
       against Testcontainers SeaweedFS check the attachment byte for byte; verified end to end
       (attachment in Mailpit, and storage down → 503 → still `DRAFT` → retry → `SENT`)
+- [x] settlement-service: connect/read timeouts and a Resilience4j circuit breaker on the
+      loan-service call, a separate `LOAN_SERVICE_UNAVAILABLE` import outcome, and `FAILED`
+      messages without internal details; verified end to end (loan-service down → breaker open →
+      half-open trial calls → closed)
 
 ## Roadmap
 
 - [x] Wire statement attachment (S3, SeaweedFS locally)
-- [ ] Redis cache-aside for loan data; Resilience4j circuit breaker
+- [x] Resilience4j circuit breaker and HTTP timeouts on the loan-service call
+- [ ] Redis cache-aside for loan data
 - [ ] Load test wire generation: sequential vs parallel calls (and check the HTTP and Kafka
       producer timeouts)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
@@ -703,12 +782,17 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
 
 ## Known limitations
 
-- No HTTP timeout on the loan-service call; a hung upstream can tie up import threads
 - `LocalDate` fields (`closingDate`, `valueDate`) are stored as local midnight in MongoDB and
   can shift a day across timezones
-- FAILED import messages expose internal details (exception class, internal URL)
 - Two simultaneous imports of the same loan report FAILED instead of ALREADY_IMPORTED
   (data stays safe because `_id` is unique)
+- While the circuit breaker is half-open, only 2 trial calls get through; in a concurrent batch
+  the other loans come back `LOAN_SERVICE_UNAVAILABLE` even though loan-service has already
+  recovered, and have to be imported again (all breaker settings are starting values to tune)
+- Each settlement-service instance has its own circuit breaker state; with several instances,
+  each one has to see the failures itself before it opens
+- Circuit breaker state changes are not logged or exposed as metrics yet (planned with
+  observability)
 - Value dates skip weekends only; there is no holiday calendar (e.g. a value date can fall on
   New Year's Day)
 - The business time zone (America/New_York) is hard-coded in `ClockConfig`, not configurable
