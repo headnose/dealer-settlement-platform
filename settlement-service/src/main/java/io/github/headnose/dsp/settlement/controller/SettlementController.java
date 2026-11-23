@@ -27,6 +27,6 @@ public class SettlementController {
     /** Settlement detail for downstream services such as wire-service (blueprint: SettlementDetailDto). */
     @GetMapping
     public SettlementDetailDto getSettlement(@PathVariable String loanId) {
-        return SettlementDetailDto.from(settlementService.getCalculatedSettlement(loanId));
+        return SettlementDetailDto.from(settlementService.getSettlementDetail(loanId));
     }
 }
