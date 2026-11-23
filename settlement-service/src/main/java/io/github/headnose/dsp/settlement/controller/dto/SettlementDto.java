@@ -14,12 +14,16 @@ public record SettlementDto(
         SettlementStatus status
 ) {
     public static SettlementDto from(LoanSettlementDocument doc) {
-        SettlementInfo s = doc.getSettlement();
+        return of(doc.getSettlement(), doc.getStatus());
+    }
+
+    /** Status lives on the document, not in SettlementInfo, so it is passed separately. */
+    public static SettlementDto of(SettlementInfo s, SettlementStatus status) {
         return new SettlementDto(
                 s.settlementId(),
                 s.grossAmount(),
                 s.totalAdjustment(),
                 s.netSettlement(),
-                doc.getStatus());
+                status);
     }
 }

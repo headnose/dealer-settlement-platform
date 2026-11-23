@@ -3,6 +3,14 @@ spring:
     name: settlement-service
   mongodb:
     uri: mongodb://localhost:27017/settlement_db
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      # C2: a dead cache must never slow a request down much. Lettuce defaults (60s command timeout,
+      # 10s connect timeout) would turn a Redis outage into very slow GETs. Starting values.
+      timeout: 500ms
+      connect-timeout: 500ms
 
 server:
   port: 8082
@@ -26,3 +34,8 @@ clients:
     base-url: http://localhost:8081
     connect-timeout: 2s
     read-timeout: 5s
+
+# C1/C6: cache-aside for GET /api/v1/loans/{loanId}/settlements (key lsc:loan:{loanId}).
+# 30m = low end of the blueprint's 30-60 min: stale settlement data is a compliance risk.
+settlement-cache:
+  ttl: 30m

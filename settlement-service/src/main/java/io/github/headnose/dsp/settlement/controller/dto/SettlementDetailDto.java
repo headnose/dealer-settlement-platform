@@ -1,5 +1,6 @@
 package io.github.headnose.dsp.settlement.controller.dto;
 
+import io.github.headnose.dsp.settlement.cache.CachedSettlementDetail;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 
 import java.util.List;
@@ -17,11 +18,16 @@ public record SettlementDetailDto(
 ) {
     /** Only valid for a CALCULATED document; the service checks this before calling. */
     public static SettlementDetailDto from(LoanSettlementDocument doc) {
+        return from(CachedSettlementDetail.from(doc));
+    }
+
+    /** One mapping path for cache hit and cache miss (C6). */
+    public static SettlementDetailDto from(CachedSettlementDetail detail) {
         return new SettlementDetailDto(
-                LoanDto.from(doc.getLoan()),
-                SettlementDto.from(doc),
-                PaymentDto.from(doc.getPayment()),
-                doc.getAdjustments().stream()
+                LoanDto.from(detail.loan()),
+                SettlementDto.of(detail.settlement(), detail.status()),
+                PaymentDto.from(detail.payment()),
+                detail.adjustments().stream()
                         .map(AdjustmentDto::from)
                         .toList());
     }
