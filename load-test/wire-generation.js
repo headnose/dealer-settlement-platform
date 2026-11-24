@@ -10,30 +10,51 @@
 //   k6 run -e RATE=5 -e DURATION=20s load-test/wire-generation.js
 // Measured run:
 //   k6 run -e RATE=20 -e DURATION=60s load-test/wire-generation.js
+// Timeout runs (slow settlement-service through Toxiproxy): every request is EXPECTED to fail with
+// 502, and many requests are in flight at once (rate x latency), so pre-allocate enough VUs:
+//   k6 run -e RATE=20 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=150 load-test/wire-generation.js
 //
-// Every request creates a DRAFT submission + 4 recipients in local wire_db (decision D5).
+// Every 201 creates a DRAFT submission + 4 recipients in local wire_db (decision D5); a 502 saves
+// nothing.
 import http from 'k6/http';
 import { check } from 'k6';
+import { Trend } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8083';
 const LOAN_ID = __ENV.LOAN_ID || 'LN-1001';
 const RATE = parseInt(__ENV.RATE || '20', 10);
 const DURATION = __ENV.DURATION || '60s';
+// 201 for normal runs, 502 for runs where the settlement-service call is meant to time out.
+const EXPECT_STATUS = parseInt(__ENV.EXPECT_STATUS || '201', 10);
+// k6 starting VUs on the fly during a run can drop iterations, so slow runs pre-allocate them.
+const PRE_VUS = parseInt(__ENV.PRE_VUS || '20', 10);
 
 export const options = {
     scenarios: {
         generate: {
             executor: 'constant-arrival-rate',
+            exec: 'generate',
             rate: RATE,
             timeUnit: '1s',
             duration: DURATION,
-            preAllocatedVUs: 20,
-            maxVUs: 200,
+            preAllocatedVUs: PRE_VUS,
+            maxVUs: 300,
+        },
+        // Samples wire-service's gauges once per second during the run (see observe()).
+        observe: {
+            executor: 'constant-arrival-rate',
+            exec: 'observe',
+            rate: 1,
+            timeUnit: '1s',
+            duration: DURATION,
+            preAllocatedVUs: 2,
+            maxVUs: 5,
         },
     },
     thresholds: {
-        // Only the scenario's requests count, not the actuator calls in setup/teardown.
+        // Only the scenario's requests count, not the actuator calls.
         'checks{scenario:generate}': ['rate==1'],
+        // "Failed" = any status other than EXPECT_STATUS (see responseCallback below).
         'http_req_failed{scenario:generate}': ['rate==0'],
         // k6 ran out of VUs = the requested rate was not really delivered.
         dropped_iterations: ['count==0'],
@@ -62,6 +83,18 @@ const SERVER_METRICS = [
 // Parts of one request; the rest of the whole request is not covered by any timer.
 const PARTS = ['LSC call (client)', 'template lookup', 'distributions findAll', 'save (persist only)'];
 
+// Gauges sampled once per second: [k6 metric name, actuator metric]. The summary's max is the peak
+// seen during the run. tomcat.threads.busy needs server.tomcat.mbeanregistry.enabled: true.
+const GAUGES = [
+    ['server_tomcat_threads_busy', 'tomcat.threads.busy'],
+    ['server_hikari_connections_active', 'hikaricp.connections.active'],
+    ['server_hikari_connections_pending', 'hikaricp.connections.pending'],
+];
+const gaugeTrends = {};
+for (const [k6Name] of GAUGES) {
+    gaugeTrends[k6Name] = new Trend(k6Name);
+}
+
 function snapshot() {
     const result = {};
     for (const [label, name, tags] of SERVER_METRICS) {
@@ -89,15 +122,32 @@ const payload = JSON.stringify({ loanId: LOAN_ID, wireType: 'SETTLEMENT' });
 const params = {
     headers: { 'Content-Type': 'application/json' },
     tags: { name: 'POST /api/v1/wires' },
+    // Only EXPECT_STATUS counts as success in http_req_failed (k6 treats 4xx/5xx as failed by default).
+    responseCallback: http.expectedStatuses(EXPECT_STATUS),
 };
 
-export default function () {
+export function generate() {
     const res = http.post(`${BASE_URL}/api/v1/wires`, payload, params);
-    check(res, {
-        'status is 201': (r) => r.status === 201,
+    const checks = { [`status is ${EXPECT_STATUS}`]: (r) => r.status === EXPECT_STATUS };
+    if (EXPECT_STATUS === 201) {
         // Short-circuit: only parse the body when the status is right.
-        'body has a SUB- id': (r) => r.status === 201 && String(r.json('submissionId')).startsWith('SUB-'),
-    });
+        checks['body has a SUB- id'] = (r) => r.status === 201 && String(r.json('submissionId')).startsWith('SUB-');
+    }
+    check(res, checks);
+}
+
+export function observe() {
+    for (const [k6Name, name] of GAUGES) {
+        const res = http.get(`${BASE_URL}/actuator/metrics/${name}`, { tags: { name: 'actuator' } });
+        if (res.status !== 200) {
+            continue; // 404 = gauge not registered (e.g. Tomcat metrics switched off)
+        }
+        // Several pools/connectors are summed; locally there is one of each.
+        const value = res.json().measurements.find((m) => m.statistic === 'VALUE');
+        if (value) {
+            gaugeTrends[k6Name].add(value.value);
+        }
+    }
 }
 
 /** Mean in ms for this run only, or null without data. */

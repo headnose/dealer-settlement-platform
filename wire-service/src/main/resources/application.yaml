@@ -40,6 +40,9 @@ spring:
 
 server:
   port: 8083
+  tomcat:
+    mbeanregistry:
+      enabled: true   # exposes tomcat.threads.busy / .config.max for the timeout load test
 
 clients:
   settlement-service:
