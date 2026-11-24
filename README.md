@@ -30,8 +30,9 @@ Finance Ops ──► wire-service ──► Kafka: email-delivery ──► not
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
-Spring Mail · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j · Docker Compose · JUnit 6 · Mockito ·
-Testcontainers · Awaitility · GreenMail
+Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
+Spring Boot Actuator + Micrometer · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
+GreenMail · k6 · Toxiproxy
 
 ## Running locally
 
@@ -51,6 +52,7 @@ mvn clean install             # build all modules and run tests
 | `kafka` | 9092 | wire-service, notification-service |
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
+| `toxiproxy` | 8474 (API), 13306, 18082 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation)) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
@@ -404,8 +406,13 @@ Example 422:
 
 settlement-service answers 404 for these two cases; wire-service answers 422 because its own
 request is valid but names a loan that cannot be wired yet. The titles are the same in both
-services. The template and settlement-service calls run one after the other; a parallel version
-is planned as a load-test comparison.
+services.
+
+The settlement-service call is started first (non-blocking, WebClient), and the template and
+distribution reads (blocking JDBC) run on the request thread while it is in flight; the save comes
+after, because it needs the settlement detail. If the reference data is missing, the call that is
+already running is cancelled and the request fails with the same 500 as before. Why it is built this
+way, and what it changed, is measured in the [load test](#load-test-wire-generation).
 
 ### wire-service data model
 
@@ -575,8 +582,8 @@ event, and the message is multipart (text + XML attachment). The order per event
 finds `SENT` in Redis never downloads anything.
 
 **Idempotency (Redis).** `recipientId` is the de-duplication key. notification-service keeps
-its own Redis (`blastmail-redis`, port 6380), separate from the cache Redis planned for
-settlement-service, so one service's evictions or flushes cannot break the other's guarantees.
+its own Redis (`blastmail-redis`, port 6380), separate from settlement-service's cache Redis, so
+one service's evictions or flushes cannot break the other's guarantees.
 Key: `blastmail:delivery:{recipientId}`.
 
 | Key state | Set when | TTL | What a new event for that recipient does |
@@ -798,6 +805,210 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   --group blastmail --topic email-delivery --reset-offsets --to-latest --execute
 ```
 
+## Load test: wire generation
+
+The blueprint's "Challenge" says wire generation was slow because wire-service loaded the template
+from MySQL and *then* called settlement-service, two independent steps one after the other, and that
+running them in parallel with WebClient fixed it. This section measures that claim on this project
+instead of repeating it. All numbers below come from my own runs; none come from the blueprint.
+
+### Setup
+
+- **Tool:** k6 v2.4.0, script [`load-test/wire-generation.js`](load-test/wire-generation.js).
+- **Open model:** a fixed arrival rate (`constant-arrival-rate`), so every version gets exactly the
+  same load and only latency can differ. A closed model (a fixed number of looping users) would send
+  more requests to whichever version is faster.
+- **Load:** 20 requests/s for 60 s (about 1,200 requests per run), after an unreported warm-up of
+  5 requests/s for 20 s (JIT, Hibernate query plans, pool connections). 20 req/s is a test input,
+  taken from the low end of the blueprint's "20-50 requests per second for short bursts".
+- **Pass criteria per run:** every response `201` with a `SUB-` id, and zero dropped iterations
+  (k6 really delivered the requested rate). Every run below passed both.
+- **Server-side split:** wire-service exposes Actuator (`health`, `metrics` only). The script reads
+  `http.server.requests`, `http.client.requests` (the settlement-service call),
+  `spring.data.repository.invocations` (per repository method) and `hikaricp.connections.acquire`
+  before and after each run and prints this run's means.
+- **Same start for every measured service:** `java -jar` on the packaged jar. IntelliJ's run
+  configuration adds `-XX:TieredStopAtLevel=1` (no optimizing JIT), which would skew the numbers.
+- **One loan:** LN-1001, its settlement detail already in settlement-service's Redis cache. Each
+  request creates a `DRAFT` submission with four recipients in local `wire_db` (cleanup below).
+
+**Injected latency (Toxiproxy).** On one laptop, MySQL and settlement-service answer in a few
+milliseconds, so the blueprint's slow network does not exist locally. Toxiproxy
+(`ghcr.io/shopify/toxiproxy:2.12.0`, profile `load-test`, proxies in
+[`load-test/toxiproxy.json`](load-test/toxiproxy.json)) sits between wire-service and both
+dependencies. "Injected" runs add **+200 ms to every settlement-service response and +20 ms to
+every MySQL round trip** (`latency` toxic, `downstream`, no jitter). These are round example values,
+not measurements of any real network, and were not chosen to reproduce the blueprint's "4 seconds".
+Every run except run 1 goes through the proxy, with or without the toxics, so the proxy's own cost
+is measured too.
+
+```bash
+docker compose up -d toxiproxy
+java -jar wire-service/target/wire-service-0.1.0-SNAPSHOT.jar \
+  --spring.datasource.url=jdbc:mysql://localhost:13306/wire_db \
+  --clients.settlement-service.base-url=http://localhost:18082
+
+# latency on (off again: curl -X DELETE localhost:8474/proxies/<proxy>/toxics/<name>)
+curl -X POST localhost:8474/proxies/settlement-service/toxics -H "Content-Type: application/json" \
+  -d '{"name":"lsc_latency","type":"latency","stream":"downstream","attributes":{"latency":200,"jitter":0}}'
+curl -X POST localhost:8474/proxies/mysql/toxics -H "Content-Type: application/json" \
+  -d '{"name":"mysql_latency","type":"latency","stream":"downstream","attributes":{"latency":20,"jitter":0}}'
+
+k6 run -e RATE=5 -e DURATION=20s load-test/wire-generation.js     # warm-up, not reported
+k6 run -e RATE=20 -e DURATION=60s load-test/wire-generation.js    # measured
+```
+
+### Results
+
+20 requests/s for 60 s, 1,200-1,201 requests per run, 100% `201`, 0 dropped iterations. MacBook,
+local Docker Desktop, runs of 2026-11-23 (run 1) and 2026-11-24 (runs 2-7).
+
+| Run | Version | Network | Server mean | k6 median | k6 p95 | k6 p99 |
+|---|---|---|---|---|---|---|
+| 1 | sequential | direct | 18.7 ms | 19.79 ms | 25.31 ms | 27.23 ms |
+| 2 | sequential | proxy | 20.3 ms | 20.98 ms | 28.72 ms | 33.25 ms |
+| 4 | P1: parallel | proxy | 17.9 ms | 18.68 ms | 26.61 ms | 29.46 ms |
+| 6 | P1 + P6: batching | proxy | **14.5 ms** | **15.31 ms** | **17.88 ms** | 28.63 ms |
+| 3 | sequential | injected | 528.5 ms | 528.35 ms | 533.81 ms | 556.11 ms |
+| 5 | P1: parallel | injected | 378.6 ms | 378.75 ms | 383.49 ms | 404.04 ms |
+| 7 | P1 + P6: batching | injected | **314.3 ms** | **314.83 ms** | **317.89 ms** | **326.69 ms** |
+
+Run 7 was repeated once by accident and gave 314.4 ms, so the setup repeats well. With injected
+latency the two changes together took the mean from 528.5 ms to 314.3 ms (-41%); through the proxy
+without latency, from 20.3 ms to 14.5 ms (-29%).
+
+Server-side split (means per request):
+
+| Run | LSC call | Template | `findAll` | Connection acquire |
+|---|---|---|---|---|
+| 1 | 3.1 ms | 2.0 ms | 1.7 ms | 0.0 ms (3 per request) |
+| 3 | 203.6 ms | 22.2 ms | 22.2 ms | 0.1 ms |
+| 5 | 203.9 ms | 22.5 ms | 22.3 ms | 0.1 ms |
+| 7 | 203.4 ms | 23.1 ms | 22.0 ms | 0.4 ms |
+
+What the runs show:
+
+- **The connection pool and threads were never the problem** (the blueprint's first theory):
+  getting a connection took about 0 ms in every run.
+- **Locally, parallelizing is not worth it for speed.** It can save at most the shorter of the two
+  sides, about 3 ms here, and saved 2.4 ms (run 2 → 4).
+- **The proxy costs about 1-2 ms** per request (run 1 → 2), mostly on the many MySQL round trips.
+- **Little's law checks out:** requests in flight = rate × response time = 20/s × 0.53 s ≈ 10.6 in
+  run 3; k6 showed 10-11 busy users, 7-9 in run 5 and 6 in run 7. Faster requests also mean fewer
+  threads and connections held at once.
+
+### What the database really receives (MySQL general log)
+
+Before P1 I predicted it could save at most 44 ms with latency (the shorter side: template +
+`findAll` = 44.4 ms). It saved 150 ms. The prediction was wrong, so I counted what MySQL actually
+receives for one request, with the general log switched on for a single request:
+
+```bash
+docker compose exec mysql mysql -uroot -proot -e "SET GLOBAL log_output='TABLE'; SET GLOBAL general_log='ON';"
+# one POST /api/v1/wires
+docker compose exec mysql mysql -uroot -proot -e "SET GLOBAL general_log='OFF'; SELECT thread_id, CONVERT(LEFT(argument, 110) USING utf8mb4) AS stmt FROM mysql.general_log WHERE command_type IN ('Query','Execute') ORDER BY event_time; TRUNCATE mysql.general_log;"
+```
+
+| # | Statement (before P6) | Part of |
+|---|---|---|
+| 1 | `select ... from wire_template ...` | template lookup (no transaction) |
+| 2 | `SET SESSION TRANSACTION READ ONLY` | `findAll` transaction |
+| 3 | `SET autocommit=0` | `findAll` transaction |
+| 4 | `select ... from notification_distribution` | `findAll` |
+| 5 | `COMMIT` | `findAll` transaction |
+| 6 | `SET autocommit=1` | `findAll` transaction |
+| 7 | `SET SESSION TRANSACTION READ WRITE` | `findAll` transaction |
+| 8 | `SET autocommit=0` | save transaction |
+| 9-13 | `insert into wire_submission`, then 4 separate `insert into wire_recipient` | save |
+| 14 | `COMMIT` | save transaction |
+| 15 | `SET autocommit=1` | save transaction |
+
+15 round trips, and the repository timers only cover the SQL itself, not the transaction
+statements around it. `findAll()` comes from Spring Data's `SimpleJpaRepository`, which runs it in
+a `@Transactional(readOnly = true)` transaction: five extra round trips. The query method declared
+in the repository interface (`findFirstByWireTypeOrderByVersionDesc`) gets no transaction by
+default and runs in autocommit. With 20 ms per round trip:
+
+- reads: 1 + 6 = 7 round trips ≈ 140 ms (the timers showed 44 ms)
+- save: 8 round trips ≈ 160 ms
+- sequential: 200 (settlement-service) + 140 + 160 = 500 ms, plus framework → **528.5 ms measured**
+- parallel: max(200, 140) + 160 = 360 ms, plus framework → **378.6 ms measured**
+
+So P1 hides the whole read cost, about 140 ms, behind the settlement-service call (150 ms
+measured). Under network latency, **the number of round trips decides the response time**, more
+than the SQL itself. That is what led to P6.
+
+### P1: start the settlement-service call first (blueprint's fix)
+
+The blueprint uses WebClient for both steps, but the template comes from MySQL through JPA/JDBC,
+and JDBC always blocks a thread; WebClient makes only HTTP calls non-blocking. So:
+
+- `SettlementServiceClient` uses WebClient on Reactor Netty (`spring-boot-starter-webclient`, not
+  the WebFlux starter: the app stays a Tomcat app). `getSettlementDetailAsync` returns a
+  `CompletableFuture`; `toFuture()` subscribes at once, because a `Mono` on its own is lazy and would
+  send nothing. Timeouts (2 s connect, 5 s response) and the error mapping (the two 404 titles,
+  5xx, timeouts, empty body) are unchanged, so the API answers exactly as before.
+- `WireGenerationService` starts the call, reads the template and distributions on the request
+  thread while it is in flight, then waits, merges and saves.
+- Rejected alternatives: two `CompletableFuture` tasks on an executor (two blocked threads per
+  request); caching the template (about 2 ms locally; the blueprint rejects it too).
+- The client is built from Boot's `WebClient.Builder` (it was the static `RestClient.builder()`
+  before), so the call is measured (`http.client.requests`) and can be traced later.
+
+### P6: batch the INSERTs (beyond the blueprint)
+
+Three settings in wire-service's `application.yaml`, no code:
+
+- `spring.jpa.properties.hibernate.jdbc.batch_size: 20` and `order_inserts: true`: Hibernate sends
+  same-table INSERTs as one JDBC batch. This only works because the IDs are assigned in Java
+  (`SUB-`/`REC-` + UUID); with `IDENTITY` (auto-increment) Hibernate cannot batch inserts.
+- `rewriteBatchedStatements: true` (MySQL Connector/J): without it, the driver still sends one
+  statement per row, so batching alone changes nothing. With it, the four recipients become one
+  multi-row `INSERT`.
+- `useLocalSessionState: true`: with only the first two changes, the general log showed a new
+  `SELECT @@session.transaction_read_only` before **each** batch, so the save went from 8 round trips
+  to only 7. This option lets the driver trust its own record of autocommit/read-only (kept up to
+  date through the JDBC API) instead of asking the server. Safe here because nothing changes session
+  state with raw `SET` statements.
+- The driver options are set under `spring.datasource.hikari.data-source-properties`, not in the
+  JDBC URL, because the load-test runs override the URL and would silently drop them.
+
+Result: 15 → 12 statements per wire, the save path from 8 to 5 round trips. Predicted -60 ms with
+latency, measured -64 ms (run 5 → 7). Critical path in run 7: 314.3 - 203.4 (settlement-service) =
+111 ms, of which 5 round trips × 20 ms = 100 ms.
+
+Rejected: `readOnlyPropagatesToServer=false` would remove the two `SET SESSION TRANSACTION ...`
+statements (2 round trips), but then MySQL no longer enforces read-only transactions; giving up that
+guarantee on wire data is not worth 40 ms.
+
+### Predictions vs measurements
+
+| Change | Predicted | Measured |
+|---|---|---|
+| P1, through the proxy (run 2 → 4) | at most ~3 ms | -2.4 ms |
+| P1, injected latency (run 3 → 5) | at most 44 ms | **-150 ms** (the ceiling used timers that leave out transaction round trips; the general log explains the real saving) |
+| P6, injected latency (run 5 → 7) | ≈ -60 ms (3 round trips) | -64 ms |
+| P6, through the proxy (run 4 → 6) | a few ms | -3.4 ms |
+
+### Caveats
+
+- k6, all services, MySQL, MongoDB and Redis share one laptop's CPU: absolute numbers are
+  "this machine" numbers; the comparison is fair because every run used the same machine and start.
+- The injected latencies are example values. In a real network the round-trip cost (and so the
+  savings) would be different, but the round-trip counts would not.
+- One loan with a warm settlement-service cache; 60-second runs; only run 7 repeated. Whether the
+  cache itself makes `GET` faster is still not measured.
+
+### Clean up local test data
+
+Every request creates a `DRAFT` (local `wire_db` only). Delete the load-test drafts for the loan,
+counting first (`created_time` = when the first run started):
+
+```bash
+docker compose exec mysql mysql -udsp -pdsp wire_db -e "SELECT COUNT(*) FROM wire_submission WHERE loan_id='LN-1001' AND status='DRAFT' AND created_time >= '2026-11-23 15:30:00';"
+docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recipient r JOIN wire_submission s ON s.submission_id = r.submission_id WHERE s.loan_id='LN-1001' AND s.status='DRAFT' AND s.created_time >= '2026-11-23 15:30:00'; DELETE FROM wire_submission WHERE loan_id='LN-1001' AND status='DRAFT' AND created_time >= '2026-11-23 15:30:00';"
+```
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -814,9 +1025,9 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
       per run, wired with `@ServiceConnection`), isolated from local manual testing
 - [x] wire-service: MySQL schema via Flyway (templates, distributions, submissions, recipients)
       with seed data; JPA entities checked by `ddl-auto: validate` against Testcontainers MySQL
-- [x] wire-service: settlement-service client (`RestClient` with connect/read timeouts) that turns
-      the two 404 titles, 5xx and I/O failures into distinct exceptions; tested with
-      `MockRestServiceServer`
+- [x] wire-service: settlement-service client (non-blocking `WebClient` on Reactor Netty with
+      connect/response timeouts) that turns the two 404 titles, 5xx and I/O failures into distinct
+      exceptions; tested against a JDK `HttpServer`
 - [x] wire-service: template merger that fills `{{placeholder}}` values in one regex pass,
       XML-escapes them, and fails fast on a placeholder with no value
 - [x] wire-service: wire generation (`POST /api/v1/wires`): template + settlement detail merged
@@ -849,14 +1060,17 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
       delete after every write, fail-open when Redis is down, TTL + LRU); integration tests against
       Testcontainers Redis; verified end to end with `redis-cli MONITOR` (miss, hit, delete on
       PATCH, Redis down, and a stale entry after a failed delete)
+- [x] Load test of wire generation (k6, open model, Toxiproxy for injected latency, Actuator timers,
+      MySQL general log): settlement-service call started before the reference-data reads (P1) and
+      batched INSERTs (P6); 528.5 → 314.3 ms with injected latency, 20.3 → 14.5 ms without
 
 ## Roadmap
 
 - [x] Wire statement attachment (S3, SeaweedFS locally)
 - [x] Resilience4j circuit breaker and HTTP timeouts on the loan-service call
 - [x] Redis cache-aside for the settlement detail
-- [ ] Load test wire generation: sequential vs parallel calls (and check the HTTP and Kafka
-      producer timeouts)
+- [x] Load test wire generation: sequential vs parallel calls, plus JDBC batching
+- [ ] Check the HTTP, S3 and Kafka producer timeouts under load (starting values so far)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
@@ -920,3 +1134,21 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   draft that is never sent again after a failed send
 - notification-service reads the whole statement into memory; fine for small XML files, not for
   large documents
+- Load-test numbers come from one laptop (load generator, services and databases share the CPU),
+  one loan with a warm cache, and injected example latencies, not a production-like environment
+- Repository timers (`spring.data.repository.invocations`) leave out transaction round trips
+  (autocommit, `COMMIT`, read-only flag); read them together with the MySQL general log
+- `findAll()` on the distributions runs in a read-only transaction that costs five extra round trips;
+  kept, because dropping server-side read-only enforcement is not worth it
+- Wire generation now starts the settlement-service call before checking the reference data: with a
+  missing template the call is made and then cancelled
+- If the distributions are missing and settlement-service is down at the same time, the answer is
+  now 500 instead of 502 (both are failures with nothing saved)
+- `useLocalSessionState` assumes session state is only changed through the JDBC API; a raw
+  `SET autocommit` statement would make the driver's view wrong
+- Reactor Netty logs an ERROR on macOS about a missing native DNS resolver
+  (`netty-resolver-dns-native-macos`) and falls back to the JDK resolver; harmless here, not added
+  because it is a platform-specific dependency
+- Actuator runs on the API port (`health`, `metrics` only); in a real deployment it must not be
+  reachable through the public load balancer
+- Each load-test request leaves a `DRAFT` submission in local `wire_db` (cleanup commands above)
