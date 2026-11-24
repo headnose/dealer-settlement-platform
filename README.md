@@ -395,7 +395,7 @@ The merged wire statement is stored in `wire_submission.content`:
 | 400 | Malformed JSON, missing fields, or unknown `wireType` |
 | 422 `Loan not imported` | settlement-service has not imported the loan |
 | 422 `Settlement not calculated` | The loan is imported but its settlement is not calculated yet |
-| 502 | settlement-service is down, timed out (connect 2s, read 5s), or returned 5xx |
+| 502 | settlement-service is down, timed out (connect 2s, read 5s), returned 5xx, or its circuit breaker is open |
 | 500 | Unexpected error, e.g. missing reference data (details are logged, not returned) |
 
 Example 422:
@@ -412,7 +412,9 @@ The settlement-service call is started first (non-blocking, WebClient), and the 
 distribution reads (blocking JDBC) run on the request thread while it is in flight; the save comes
 after, because it needs the settlement detail. If the reference data is missing, the call that is
 already running is cancelled and the request fails with the same 500 as before. Why it is built this
-way, and what it changed, is measured in the [load test](#load-test-wire-generation).
+way, and what it changed, is measured in the [load test](#load-test-wire-generation). A circuit
+breaker on the call answers `502` at once while settlement-service keeps failing; see
+[Timeouts under load](#timeouts-under-load-the-settlement-service-call).
 
 ### wire-service data model
 
@@ -1009,6 +1011,155 @@ docker compose exec mysql mysql -udsp -pdsp wire_db -e "SELECT COUNT(*) FROM wir
 docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recipient r JOIN wire_submission s ON s.submission_id = r.submission_id WHERE s.loan_id='LN-1001' AND s.status='DRAFT' AND s.created_time >= '2026-11-23 15:30:00'; DELETE FROM wire_submission WHERE loan_id='LN-1001' AND status='DRAFT' AND created_time >= '2026-11-23 15:30:00';"
 ```
 
+## Timeouts under load: the settlement-service call
+
+The previous load test made wire generation faster when everything works. This one asks what happens
+when settlement-service is **slow**: does the 5 s response timeout really fire under load, and what
+else runs out before it does? The timeout values (connect 2 s, response 5 s) were starting values;
+the blueprint gives none. As before, every number comes from my own runs (2026-11-24, same MacBook).
+
+### Setup
+
+- Same k6 script, extended for these runs: `EXPECT_STATUS=502` for runs where every request is meant
+  to fail (so a stray 201 or 500 still fails the run), `PRE_VUS` / `MAX_VUS` so k6 can hold hundreds
+  of slow requests open, and a second scenario that samples gauges once a second:
+  `tomcat.threads.busy` (needs `server.tomcat.mbeanregistry.enabled: true`),
+  `hikaricp.connections.active` / `pending`, and later the circuit breaker state.
+- Only settlement-service goes through Toxiproxy; MySQL is direct, so only this one timeout is tested.
+  A `latency` toxic of 4 s (just under the timeout) or 6 s (just over it) delays every response.
+- Tomcat has its default 200 request threads.
+
+```bash
+docker compose up -d toxiproxy
+java -jar wire-service/target/wire-service-0.1.0-SNAPSHOT.jar --clients.settlement-service.base-url=http://localhost:18082
+curl -X POST localhost:8474/proxies/settlement-service/toxics -H "Content-Type: application/json" \
+  -d '{"name":"lsc_latency","type":"latency","stream":"downstream","attributes":{"latency":6000,"jitter":0}}'
+k6 run -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=900 -e MAX_VUS=1200 load-test/wire-generation.js
+```
+
+### Results
+
+| Run | Added latency | Rate | Breaker | Responses | k6 median | k6 p95 | k6 max | Server mean | Tomcat busy (peak) |
+|---|---|---|---|---|---|---|---|---|---|
+| T1 | 4 s | 20/s | — | 1,200 × `201` | 4.01 s | 4.02 s | 4.14 s | 4,014.5 ms | 84 |
+| T2 | 6 s | 20/s | — | 1,201 × `502` | 5.00 s | 5.00 s | 5.22 s | 5,006.3 ms | 102 |
+| T3 | 6 s | ~46.7/s (50 asked) | — | 2,800 × `502` | 10.97 s | 14.48 s | 14.58 s | 5,004.9 ms | 200 |
+| T3b | 6 s | 50/s | — | 3,001 × `502` | 12.03 s | 19.14 s | 20.14 s | 5,005.6 ms | 200 |
+| T4 | 6 s | 50/s | yes | 3,000 × `502` | **6.97 ms** | 5.00 s | **6.07 s** | 357.6 ms | 200 (median 2) |
+| T5 | none | 5/s | yes, open at start | 101 × `201` | 18.7 ms | 22.81 ms | 24.28 ms | 17.6 ms | 2 |
+
+Hikari never had more than 4 active connections or any pending request in any run: no DB connection
+is held while the settlement-service call is in flight (D9: remote calls outside any transaction,
+`open-in-view: false`).
+
+**T1 and T2: the timeout works.** At 4 s every request succeeded in about 4 s; at 6 s every request
+got a `502` after 5.00 s, the response timeout, not the 6 s answer. Little's law held both times:
+20/s × 4 s = 80 requests in flight (Tomcat showed 82 busy, plus the sampler's own calls), 20/s × 5 s =
+100 (102 busy). T1 also settled a question the documentation could not: I could not tell from it
+whether WebClient's default connection pool allows 16 or 500 connections. With 16, most T1 requests
+would have failed fast or waited far longer than 4 s; all 1,200 succeeded at about 4 s, so the pool was
+not the limit at 80 concurrent calls.
+
+**T1 also shows what P1 does not do.** A Tomcat thread is busy for the whole 4 s of every request. The
+settlement-service call itself is non-blocking (Netty), but the request thread then waits in `join()`
+for the answer. The blueprint says WebClient "frees the thread while waiting"; here that is true for
+Netty's I/O threads, not for the request thread. Freeing that one too would need an asynchronous
+controller or WebFlux, a design change rather than a setting (see Known limitations).
+
+**T3: more requests in flight than threads.** At 50 req/s a 5 s timeout needs 50 × 5 = 250 requests in
+flight, more than Tomcat's 200 threads. So at most 200 / 5 s = 40 requests per second can be served;
+the other 10 per second wait for a free thread, and that queue grows for the whole run:
+
+- **Model:** after 60 s about 600 requests are waiting; at 40 per second the last one waits about
+  15 s for a thread, then 5 s for the timeout: about **20 s**.
+- **T3b measured 20.14 s** (median 12.03 s). The first T3 run reached only 14.58 s because k6 had too
+  few virtual users ready and really sent about 46.7 req/s (about 200 requests dropped); with that rate the
+  same model gives about 15 s. Pre-allocating 900 VUs (T3b) fixed the rate.
+- **The server's own metrics did not see it.** `http.server.requests` said 5.0 s in both runs while
+  users waited up to 20 s: the timer starts only when a thread picks the request up, so the time spent
+  waiting for a thread is invisible on the server. Only the client (or a load balancer's target
+  response time) shows it.
+- **Actuator queued too.** It runs on the same port and thread pool, so the gauge sampler could not get
+  its answers in time (k6: "Insufficient VUs … scenario=observe"); see Known limitations.
+
+So a 5 s timeout protects the request threads only while rate × timeout stays below the thread count:
+at 20 req/s it does (100 < 200), at 50 req/s it does not (250 > 200).
+
+### Circuit breaker on the settlement-service call (beyond the blueprint)
+
+The blueprint puts a circuit breaker only on the loan-service call (settlement-service, see above). T3
+is the reason this project adds one to wire-service's settlement-service call too: a timeout limits how
+long **one** request waits; a circuit breaker limits how **many** requests pay that wait.
+
+- **B1, inside the WebClient chain.** A Resilience4j `CircuitBreakerOperator`
+  (`resilience4j-reactor`) is applied to the `Mono`, not the `@CircuitBreaker` annotation used in
+  settlement-service. When the template is missing, P1 cancels the call that is already running; the
+  operator treats a cancellation as "release the permit", while the annotation on a
+  `CompletableFuture` method could count it as a settlement-service failure, so a missing template
+  could open the breaker. No Spring proxy is involved, and the registry and YAML settings still come
+  from `resilience4j-spring-boot4`.
+- **B2, only "unavailable" is a failure:** timeouts, connection errors, 5xx and an empty body
+  (`SettlementServiceUnavailableException`, the only entry in `record-exceptions`). The two business
+  404s count as successful calls.
+- **B3, the API does not change.** While the breaker is open the call is never made and the client
+  throws the same `SettlementServiceUnavailableException`, so the answer is the same `502`, in
+  milliseconds instead of 5 s.
+- **B4, settings:** the same starting values as settlement-service's breaker (last 10 calls, at least
+  5, opens at 50% failures, open for 10 s, 2 trial calls when half-open), under
+  `resilience4j.circuitbreaker.instances.settlementService`.
+- **B5, no retry and no fallback.** A retry adds load to a struggling dependency, and wire-service has
+  no settlement data of its own to fall back on; stale money figures would be worse than a `502`.
+
+Five requests in a row with the 6 s toxic, then more:
+
+```
+502 5.024492s
+502 5.016904s
+502 5.018480s
+502 5.022604s      (plus a fifth 5 s call; Actuator counted 5 failed calls, 25.28 s in total)
+502 0.015601s
+502 0.011488s
+502 0.011935s
+```
+
+The breaker metrics (`resilience4j.circuitbreaker.calls`, `.not.permitted.calls`, `.state`) appear in
+Actuator; the k6 script samples the open state and prints the number of calls that failed fast.
+
+**T4 (T3b's load with the breaker):** the median went from 12.03 s to **6.97 ms** and the maximum from
+20.14 s to 6.07 s. Only **210** of the 3,000 requests reached settlement-service; the other 2,790
+failed fast. 210 is about Tomcat's 200 threads plus 2 trial calls per half-open cycle: the breaker only
+learns from calls that have **finished**, and the first ones finish after 5 s, so the first wave (as
+many as there are threads) still waits the full timeout. After that, the breaker is open about 70% of
+the time (0.69 of the samples), every 10 s or so two trial calls fail after 5 s and it opens again,
+Tomcat's busy threads drop to a median of 2, and Actuator answers again (no dropped samples).
+
+**T5 (recovery):** with the toxic removed, the first request after the open period moved the breaker
+to half-open, both trial calls succeeded, and it closed: 101 of 101 requests `201`, no call refused,
+final state `closed`.
+
+### Predictions vs measurements
+
+| Run | Predicted | Measured |
+|---|---|---|
+| T1 | all `201` at about 4.0 s; ~80 threads busy; Hikari low | 4.01 s median; 82-84 busy; Hikari ≤ 4 |
+| T1 | WebClient pool might limit at 16 connections | not the limit (all `201` at ~4 s) |
+| T2 | all `502` at about 5.0 s; ~100 threads busy | 5.00 s; 102 busy |
+| T2 | a stack trace per failed request in the log | **wrong**: two one-line WARNs per request |
+| T3b | worst wait about 20 s, median 12-13 s | 20.14 s, 12.03 s |
+| T4 | ~250 slow calls + ~8 trial calls | **210**: only as many as there are threads (200), not every request of the first 5 s |
+| T4 | median a few ms, max about 6-7 s | 6.97 ms, 6.07 s |
+| T5 | all `201`, breaker closed | 101 × `201`, `closed` |
+
+### Caveats
+
+- One laptop, injected example latencies, one loan, 60-second runs; the thread and queue numbers are
+  for Tomcat's default 200 threads.
+- The other timeouts on the list are not covered yet: the loan-service calls during import
+  (settlement-service) and the S3 and Kafka producer timeouts on the send path. Load-testing send needs
+  many unique `CLOSED` loans, because each loan can be sent only once (see Roadmap).
+- Each `201` creates a `DRAFT`; this round left 1,504 submissions (6,016 recipients), deleted with the
+  commands above using `created_time >= '2026-11-24 16:10:00'`.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -1063,6 +1214,10 @@ docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recip
 - [x] Load test of wire generation (k6, open model, Toxiproxy for injected latency, Actuator timers,
       MySQL general log): settlement-service call started before the reference-data reads (P1) and
       batched INSERTs (P6); 528.5 → 314.3 ms with injected latency, 20.3 → 14.5 ms without
+- [x] Timeouts under load for the settlement-service call (k6 + Toxiproxy, Tomcat thread gauge): the
+      5 s timeout fires on time, but at 50 req/s requests queued for threads for up to 20 s; a
+      Resilience4j circuit breaker on the call (reactive operator, same 502) cut the median to
+      6.97 ms and only 210 of 3,000 requests waited; verified recovery (half-open → closed)
 
 ## Roadmap
 
@@ -1070,7 +1225,11 @@ docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recip
 - [x] Resilience4j circuit breaker and HTTP timeouts on the loan-service call
 - [x] Redis cache-aside for the settlement detail
 - [x] Load test wire generation: sequential vs parallel calls, plus JDBC batching
-- [ ] Check the HTTP, S3 and Kafka producer timeouts under load (starting values so far)
+- [x] Timeouts under load: settlement-service call (plus a circuit breaker on it)
+- [ ] Timeouts under load: loan-service calls during import (settlement-service; read timeout,
+      breaker and the 4-10 thread import pool together)
+- [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
+      `CLOSED` loans or seeded drafts, because each loan can be sent only once)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
@@ -1086,10 +1245,10 @@ docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recip
 - While the circuit breaker is half-open, only 2 trial calls get through; in a concurrent batch
   the other loans come back `LOAN_SERVICE_UNAVAILABLE` even though loan-service has already
   recovered, and have to be imported again (all breaker settings are starting values to tune)
-- Each settlement-service instance has its own circuit breaker state; with several instances,
-  each one has to see the failures itself before it opens
-- Circuit breaker state changes are not logged or exposed as metrics yet (planned with
-  observability)
+- Each instance has its own circuit breaker state (settlement-service and wire-service alike); with
+  several instances, each one has to see the failures itself before it opens
+- settlement-service's circuit breaker state changes are not logged or exposed as metrics yet
+  (it has no Actuator); wire-service's breaker metrics are in Actuator
 - The cache holds the whole settlement detail, not only loan metadata as the blueprint says,
   because loan and settlement share one MongoDB document (caching only the loan saves no read)
 - If deleting a cache entry fails (Redis unreachable during a `PATCH`), the old settlement can be
@@ -1150,5 +1309,17 @@ docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recip
   (`netty-resolver-dns-native-macos`) and falls back to the JDK resolver; harmless here, not added
   because it is a platform-specific dependency
 - Actuator runs on the API port (`health`, `metrics` only); in a real deployment it must not be
-  reachable through the public load balancer
+  reachable through the public load balancer. It also shares the request threads: when they were all
+  busy (T3), Actuator calls queued with everything else (a separate `management.server.port` would
+  give it its own)
 - Each load-test request leaves a `DRAFT` submission in local `wire_db` (cleanup commands above)
+- The request thread waits (`join()`) while the settlement-service call is in flight: WebClient frees
+  Netty's I/O threads, not Tomcat's; fully non-blocking would need an asynchronous controller or WebFlux
+- A 5 s timeout protects the 200 request threads only while rate × timeout stays below 200; above
+  that (e.g. 50 req/s) requests queue for a thread, and `http.server.requests` does not show that wait
+- wire-service's circuit breaker only learns from finished calls: when settlement-service becomes
+  slow, the first wave (up to 200 requests, one per thread) still waits the full 5 s before it opens
+- After its 10 s open period the breaker moves to half-open only when the next request arrives
+  (automatic transition is off); while half-open, requests beyond the 2 trial calls get an immediate `502`
+- Each timed-out settlement-service call logs two WARN lines (Netty's `ReadTimeoutException` and the
+  handler's message): about 2 lines per request during an outage
