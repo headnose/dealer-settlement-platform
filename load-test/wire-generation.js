@@ -53,7 +53,8 @@ const SERVER_METRICS = [
         ['repository:WireTemplateRepository', 'method:findFirstByWireTypeOrderByVersionDesc']],
     ['distributions findAll', 'spring.data.repository.invocations',
         ['repository:NotificationDistributionRepository', 'method:findAll']],
-    // persist() only: Hibernate sends the INSERTs at commit, outside this timer (see "rest").
+    // persist() only: Hibernate sends the INSERTs at commit, outside this timer. Transaction round trips
+    // (autocommit off/on, COMMIT, read-only flag) are outside ALL repository timers (MySQL general log, P6).
     ['save (persist only)', 'spring.data.repository.invocations',
         ['repository:WireSubmissionRepository', 'method:save']],
     ['DB connection acquire', 'hikaricp.connections.acquire', []],
@@ -123,9 +124,17 @@ export function teardown(before) {
         console.log(`  ${label}: ${m.count} calls, mean ${m.mean.toFixed(1)} ms, max ${m.max.toFixed(1)} ms (last ~2 min)`);
     }
     const whole = meanMs(before, after, WHOLE);
+    const lsc = meanMs(before, after, PARTS[0]);
     const parts = PARTS.map((label) => meanMs(before, after, label));
     if (whole && parts.every((p) => p)) {
+        // Only meaningful for the SEQUENTIAL version: in the parallel one (P1) the LSC call and the reads
+        // overlap, so subtracting both counts the overlap twice.
         const rest = whole.mean - parts.reduce((sum, p) => sum + p.mean, 0);
-        console.log(`  rest (INSERTs+commit, merge, JSON, framework): mean ${rest.toFixed(1)} ms per request`);
+        console.log(`  rest, sequential version only (whole minus all parts): mean ${rest.toFixed(1)} ms per request`);
+    }
+    if (whole && lsc) {
+        // Parallel version: after LSC answers, only merge + save + framework remain on the critical path.
+        // Note: repository timers exclude transaction round trips (begin/commit, read-only flag).
+        console.log(`  whole minus LSC (parallel critical path after LSC): mean ${(whole.mean - lsc.mean).toFixed(1)} ms per request`);
     }
 }
