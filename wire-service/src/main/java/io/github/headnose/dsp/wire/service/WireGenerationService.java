@@ -19,8 +19,14 @@ import java.time.LocalDateTime;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
-/** Generates a settlement wire statement as a DRAFT submission (blueprint: Workflow 3). */
+/**
+ * Generates a settlement wire statement as a DRAFT submission (blueprint: Workflow 3).
+ * P1: the settlement-service call is started first and runs while this thread does the
+ * reference-data reads (blocking JDBC); the save needs the settlement detail, so it comes after.
+ */
 @Service
 public class WireGenerationService {
 
@@ -52,35 +58,59 @@ public class WireGenerationService {
      * @throws IllegalStateException missing template or distribution (broken reference data)
      */
     public WireSubmission generate(WireGenerationRequestDto request) {
-        // 1. Load wire template (MySQL)
-        WireTemplate template = templateRepository
-                .findFirstByWireTypeOrderByVersionDesc(request.wireType())
-                .orElseThrow(() -> new IllegalStateException(
-                        "No wire template configured for wire type " + request.wireType()));
+        // 1. Start the settlement-service call (non-blocking): it is in flight during steps 2 and 3
+        CompletableFuture<SettlementDetailDto> detailFuture =
+                settlementServiceClient.getSettlementDetailAsync(request.loanId());
 
-        // 2. Retrieve settlement information (settlement-service)
-        SettlementDetailDto detail = settlementServiceClient.getSettlementDetail(request.loanId());
+        // 2 + 3. Reference data (MySQL, blocking JDBC) on this thread, overlapping with the HTTP call
+        WireTemplate template;
+        Map<DistributionType, NotificationDistribution> distributions;
+        try {
+            template = templateRepository
+                    .findFirstByWireTypeOrderByVersionDesc(request.wireType())
+                    .orElseThrow(() -> new IllegalStateException(
+                            "No wire template configured for wire type " + request.wireType()));
+            distributions = standingDistributions();
+        } catch (RuntimeException brokenReferenceData) {
+            // Same error as before (500); the settlement detail is not needed any more
+            detailFuture.cancel(true);
+            throw brokenReferenceData;
+        }
 
-        // 3. Generate wire statement: merge template + settlement detail
+        // 4. Wait for the settlement detail (bounded by the client's 2s connect / 5s response timeouts)
+        SettlementDetailDto detail = await(detailFuture);
+
+        // 5. Generate wire statement: merge template + settlement detail
         String content = templateMerger.merge(template.getTemplateContent(), templateValues(detail));
         WireSubmission submission = WireSubmission.draft(
                 request.loanId(), request.wireType(), content, LocalDateTime.now(clock));
 
-        // 4. Create recipients: dealer pair from the loan's dealer record, internal pair from the reference table
+        // 6. Create recipients: dealer pair from the loan's dealer record, internal pair from the reference table
         DealerDto dealer = detail.loan().dealer();
         submission.addRecipient(RecipientType.DEALER,
                 dealer.dealerName(), dealer.dealerContactEmail());
         submission.addRecipient(RecipientType.DEALER_BANK_CONTACT,
                 dealer.dealerBankName(), dealer.dealerBankContactEmail());
 
-        Map<DistributionType, NotificationDistribution> distributions = standingDistributions();
         NotificationDistribution audit = distributions.get(DistributionType.AUDIT_DISTRIBUTION);
         NotificationDistribution ops = distributions.get(DistributionType.INTERNAL_OPS_DISTRIBUTION);
         submission.addRecipient(RecipientType.AUDIT_DISTRIBUTION, audit.getName(), audit.getEmail());
         submission.addRecipient(RecipientType.INTERNAL_OPS_DISTRIBUTION, ops.getName(), ops.getEmail());
 
-        // 5. Save: one save() = one transaction for the submission and its 4 recipients (cascade)
+        // 7. Save: one save() = one transaction for the submission and its 4 recipients (cascade)
         return submissionRepository.save(submission);
+    }
+
+    /** join() wraps the failure in CompletionException; unwrap it so callers see the same exceptions as before. */
+    private static SettlementDetailDto await(CompletableFuture<SettlementDetailDto> future) {
+        try {
+            return future.join();
+        } catch (CompletionException e) {
+            if (e.getCause() instanceof RuntimeException cause) {
+                throw cause;
+            }
+            throw e;
+        }
     }
 
     /** Placeholder name -> value. Names match the {{...}} placeholders in the seeded template. */
