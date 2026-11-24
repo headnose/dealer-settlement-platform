@@ -1,0 +1,14 @@
+[
+  {
+    "name": "mysql",
+    "listen": "0.0.0.0:13306",
+    "upstream": "mysql:3306",
+    "enabled": true
+  },
+  {
+    "name": "settlement-service",
+    "listen": "0.0.0.0:18082",
+    "upstream": "host.docker.internal:8082",
+    "enabled": true
+  }
+]
