@@ -2,6 +2,10 @@ package io.github.headnose.dsp.wire.client;
 
 import io.github.headnose.dsp.wire.client.dto.LscProblem;
 import io.github.headnose.dsp.wire.client.dto.SettlementDetailDto;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import io.netty.channel.ChannelOption;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -21,6 +25,11 @@ import java.util.concurrent.CompletableFuture;
  * Non-blocking (WebClient on Reactor Netty), so the caller can do its blocking JDBC reads while the
  * HTTP call is in flight (P1). Built from Boot's autoconfigured WebClient.Builder, so every call is
  * observed (metric http.client.requests). Timeouts are still our own (2s/5s).
+ * <p>
+ * Circuit breaker "settlementService" (B1-B5): when settlement-service keeps timing out, the breaker opens
+ * and calls fail at once instead of holding a Tomcat thread for the full read timeout. The load test
+ * showed why: at 50 req/s a 5s timeout needs 250 threads, more than Tomcat's 200, so requests queued for
+ * up to 20s.
  */
 @Component
 public class SettlementServiceClient {
@@ -29,11 +38,16 @@ public class SettlementServiceClient {
     static final String LOAN_NOT_IMPORTED_TITLE = "Loan not imported";
     static final String SETTLEMENT_NOT_CALCULATED_TITLE = "Settlement not calculated";
 
+    /** Instance name in resilience4j.circuitbreaker.instances (application.yaml). */
+    static final String CIRCUIT_BREAKER = "settlementService";
+
     private final WebClient webClient;
+    private final CircuitBreaker circuitBreaker;
 
     /** Boot's builder is prototype-scoped: this client gets its own copy, so the connector affects no one else. */
     public SettlementServiceClient(
             WebClient.Builder builder,
+            CircuitBreakerRegistry circuitBreakerRegistry,
             @Value("${clients.settlement-service.base-url}") String baseUrl,
             @Value("${clients.settlement-service.connect-timeout}") Duration connectTimeout,
             @Value("${clients.settlement-service.read-timeout}") Duration readTimeout) {
@@ -45,6 +59,8 @@ public class SettlementServiceClient {
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .baseUrl(baseUrl)
                 .build();
+        // Returns the instance configured in YAML (created by Resilience4j's Boot auto-configuration).
+        this.circuitBreaker = circuitBreakerRegistry.circuitBreaker(CIRCUIT_BREAKER);
     }
 
     /**
@@ -53,7 +69,8 @@ public class SettlementServiceClient {
      *
      * @throws LoanNotImportedException             settlement-service: 404 "Loan not imported"
      * @throws SettlementNotCalculatedException     settlement-service: 404 "Settlement not calculated"
-     * @throws SettlementServiceUnavailableException 5xx, timeout, connection refused, empty body, or another 404
+     * @throws SettlementServiceUnavailableException 5xx, timeout, connection refused, empty body, another 404,
+     *                                              or the circuit breaker is open (no call is made)
      */
     public CompletableFuture<SettlementDetailDto> getSettlementDetailAsync(String loanId) {
         return webClient.get()
@@ -65,6 +82,13 @@ public class SettlementServiceClient {
                 .onErrorMap(WebClientResponseException.NotFound.class, e -> translateNotFound(loanId, e))
                 .onErrorMap(SettlementServiceClient::isUnavailable, e -> new SettlementServiceUnavailableException(
                         "settlement-service did not answer for loan " + loanId, e))
+                // After the error mapping, so the breaker sees our exception types (B2: only
+                // SettlementServiceUnavailableException is recorded as a failure). transformDeferred: the
+                // permit is checked per subscription; when OPEN, the HTTP call above is never subscribed.
+                .transformDeferred(CircuitBreakerOperator.of(circuitBreaker))
+                // B3: open breaker = settlement-service unavailable -> the existing 502 (API unchanged, D3).
+                .onErrorMap(CallNotPermittedException.class, e -> new SettlementServiceUnavailableException(
+                        "settlement-service circuit breaker is open; not called for loan " + loanId, e))
                 .toFuture();
     }
 
