@@ -40,6 +40,9 @@ spring:
 
 server:
   port: 8083
+  tomcat:
+    mbeanregistry:
+      enabled: true   # exposes tomcat.threads.busy / .config.max for the timeout load test
 
 clients:
   settlement-service:
@@ -50,6 +53,23 @@ clients:
 topics:
   partitions: 6
   replication-factor: 1   # blueprint: >= 3 in production; a single local broker only supports 1
+
+# B4: circuit breaker on the settlement-service call (same starting values as settlement-service's
+# loanService breaker, L3). Only "settlement-service unavailable" counts as a failure (timeout, connection
+# error, 5xx, empty body); the two business 404s count as successful calls. Starting values: tune with the
+# load test.
+resilience4j:
+  circuitbreaker:
+    instances:
+      settlementService:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 2
+        record-exceptions:
+          - io.github.headnose.dsp.wire.client.SettlementServiceUnavailableException
 
 # Wire statement attachments (D21-D24). Local = SeaweedFS from docker compose.
 storage:

@@ -10,30 +10,56 @@
 //   k6 run -e RATE=5 -e DURATION=20s load-test/wire-generation.js
 // Measured run:
 //   k6 run -e RATE=20 -e DURATION=60s load-test/wire-generation.js
+// Timeout runs (slow settlement-service through Toxiproxy): every request is EXPECTED to fail with
+// 502, and many requests are in flight at once (rate x latency), so pre-allocate enough VUs:
+//   k6 run -e RATE=20 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=150 load-test/wire-generation.js
+// Saturation run (more requests in flight than Tomcat has threads):
+//   k6 run -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=400 -e MAX_VUS=1000 load-test/wire-generation.js
 //
-// Every request creates a DRAFT submission + 4 recipients in local wire_db (decision D5).
+// Every 201 creates a DRAFT submission + 4 recipients in local wire_db (decision D5); a 502 saves
+// nothing.
 import http from 'k6/http';
 import { check } from 'k6';
+import { Trend } from 'k6/metrics';
 
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8083';
 const LOAN_ID = __ENV.LOAN_ID || 'LN-1001';
 const RATE = parseInt(__ENV.RATE || '20', 10);
 const DURATION = __ENV.DURATION || '60s';
+// 201 for normal runs, 502 for runs where the settlement-service call is meant to time out.
+const EXPECT_STATUS = parseInt(__ENV.EXPECT_STATUS || '201', 10);
+// k6 starting VUs on the fly during a run can drop iterations, so slow runs pre-allocate them.
+const PRE_VUS = parseInt(__ENV.PRE_VUS || '20', 10);
+// Upper limit of concurrent requests k6 may hold open. If the server queues requests, in-flight grows
+// past rate x latency; raise this so a full server shows up as latency, not as k6 dropping iterations.
+const MAX_VUS = parseInt(__ENV.MAX_VUS || '300', 10);
 
 export const options = {
     scenarios: {
         generate: {
             executor: 'constant-arrival-rate',
+            exec: 'generate',
             rate: RATE,
             timeUnit: '1s',
             duration: DURATION,
-            preAllocatedVUs: 20,
-            maxVUs: 200,
+            preAllocatedVUs: PRE_VUS,
+            maxVUs: MAX_VUS,
+        },
+        // Samples wire-service's gauges once per second during the run (see observe()).
+        observe: {
+            executor: 'constant-arrival-rate',
+            exec: 'observe',
+            rate: 1,
+            timeUnit: '1s',
+            duration: DURATION,
+            preAllocatedVUs: 2,
+            maxVUs: 5,
         },
     },
     thresholds: {
-        // Only the scenario's requests count, not the actuator calls in setup/teardown.
+        // Only the scenario's requests count, not the actuator calls.
         'checks{scenario:generate}': ['rate==1'],
+        // "Failed" = any status other than EXPECT_STATUS (see responseCallback below).
         'http_req_failed{scenario:generate}': ['rate==0'],
         // k6 ran out of VUs = the requested rate was not really delivered.
         dropped_iterations: ['count==0'],
@@ -62,12 +88,39 @@ const SERVER_METRICS = [
 // Parts of one request; the rest of the whole request is not covered by any timer.
 const PARTS = ['LSC call (client)', 'template lookup', 'distributions findAll', 'save (persist only)'];
 
+// Gauges sampled once per second: [k6 metric name, actuator metric, tags]. The summary's max is the peak
+// seen during the run. tomcat.threads.busy needs server.tomcat.mbeanregistry.enabled: true.
+// The breaker gauge is 1 while the settlementService breaker is OPEN, else 0 (avg = share of samples open).
+const GAUGES = [
+    ['server_tomcat_threads_busy', 'tomcat.threads.busy', []],
+    ['server_hikari_connections_active', 'hikaricp.connections.active', []],
+    ['server_hikari_connections_pending', 'hikaricp.connections.pending', []],
+    ['server_breaker_open', 'resilience4j.circuitbreaker.state', ['name:settlementService', 'state:open']],
+];
+// Counters printed as "this run" deltas in teardown: [label, actuator metric, tags].
+const COUNTERS = [
+    ['breaker: calls not permitted (failed fast)', 'resilience4j.circuitbreaker.not.permitted.calls',
+        ['name:settlementService']],
+];
+const gaugeTrends = {};
+for (const [k6Name] of GAUGES) {
+    gaugeTrends[k6Name] = new Trend(k6Name);
+}
+
+function metricUrl(name, tags) {
+    const query = tags.map((t) => `tag=${encodeURIComponent(t)}`).join('&');
+    return `${BASE_URL}/actuator/metrics/${name}${query ? `?${query}` : ''}`;
+}
+
 function snapshot() {
-    const result = {};
+    const result = { counters: {} };
+    for (const [label, name, tags] of COUNTERS) {
+        const res = http.get(metricUrl(name, tags), { tags: { name: 'actuator' } });
+        const count = res.status === 200 ? res.json().measurements.find((m) => m.statistic === 'COUNT') : null;
+        result.counters[label] = count ? count.value : null; // null = metric not registered
+    }
     for (const [label, name, tags] of SERVER_METRICS) {
-        const query = tags.map((t) => `tag=${encodeURIComponent(t)}`).join('&');
-        const url = `${BASE_URL}/actuator/metrics/${name}${query ? `?${query}` : ''}`;
-        const res = http.get(url, { tags: { name: 'actuator' } });
+        const res = http.get(metricUrl(name, tags), { tags: { name: 'actuator' } });
         if (res.status !== 200) {
             result[label] = null; // 404 = no data recorded yet for these tags
             continue;
@@ -89,15 +142,32 @@ const payload = JSON.stringify({ loanId: LOAN_ID, wireType: 'SETTLEMENT' });
 const params = {
     headers: { 'Content-Type': 'application/json' },
     tags: { name: 'POST /api/v1/wires' },
+    // Only EXPECT_STATUS counts as success in http_req_failed (k6 treats 4xx/5xx as failed by default).
+    responseCallback: http.expectedStatuses(EXPECT_STATUS),
 };
 
-export default function () {
+export function generate() {
     const res = http.post(`${BASE_URL}/api/v1/wires`, payload, params);
-    check(res, {
-        'status is 201': (r) => r.status === 201,
+    const checks = { [`status is ${EXPECT_STATUS}`]: (r) => r.status === EXPECT_STATUS };
+    if (EXPECT_STATUS === 201) {
         // Short-circuit: only parse the body when the status is right.
-        'body has a SUB- id': (r) => r.status === 201 && String(r.json('submissionId')).startsWith('SUB-'),
-    });
+        checks['body has a SUB- id'] = (r) => r.status === 201 && String(r.json('submissionId')).startsWith('SUB-');
+    }
+    check(res, checks);
+}
+
+export function observe() {
+    for (const [k6Name, name, tags] of GAUGES) {
+        const res = http.get(metricUrl(name, tags), { tags: { name: 'actuator' } });
+        if (res.status !== 200) {
+            continue; // 404 = gauge not registered (e.g. Tomcat metrics switched off)
+        }
+        // Several pools/connectors are summed; locally there is one of each.
+        const value = res.json().measurements.find((m) => m.statistic === 'VALUE');
+        if (value) {
+            gaugeTrends[k6Name].add(value.value);
+        }
+    }
 }
 
 /** Mean in ms for this run only, or null without data. */
@@ -123,16 +193,30 @@ export function teardown(before) {
         // Micrometer's MAX is a decaying max over the last ~2 minutes, not strictly this run.
         console.log(`  ${label}: ${m.count} calls, mean ${m.mean.toFixed(1)} ms, max ${m.max.toFixed(1)} ms (last ~2 min)`);
     }
+    for (const [label] of COUNTERS) {
+        const b = before.counters[label];
+        const a = after.counters[label];
+        console.log(a === null || a === undefined
+            ? `  ${label}: no data`
+            : `  ${label}: ${a - (b || 0)} this run`);
+    }
     const whole = meanMs(before, after, WHOLE);
     const lsc = meanMs(before, after, PARTS[0]);
     const parts = PARTS.map((label) => meanMs(before, after, label));
-    if (whole && parts.every((p) => p)) {
+    // Both lines assume every request made exactly one settlement-service call. With an open circuit
+    // breaker most requests make none, and subtracting the mean of a few slow calls from the mean of all
+    // requests gives a meaningless (even negative) number, so skip them.
+    const sameCount = whole && lsc && whole.count === lsc.count;
+    if (!sameCount) {
+        console.log('  (rest / whole-minus-LSC skipped: not every request made the settlement-service call)');
+    }
+    if (sameCount && parts.every((p) => p)) {
         // Only meaningful for the SEQUENTIAL version: in the parallel one (P1) the LSC call and the reads
         // overlap, so subtracting both counts the overlap twice.
         const rest = whole.mean - parts.reduce((sum, p) => sum + p.mean, 0);
         console.log(`  rest, sequential version only (whole minus all parts): mean ${rest.toFixed(1)} ms per request`);
     }
-    if (whole && lsc) {
+    if (sameCount) {
         // Parallel version: after LSC answers, only merge + save + framework remain on the critical path.
         // Note: repository timers exclude transaction round trips (begin/commit, read-only flag).
         console.log(`  whole minus LSC (parallel critical path after LSC): mean ${(whole.mean - lsc.mean).toFixed(1)} ms per request`);
