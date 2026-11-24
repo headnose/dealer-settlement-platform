@@ -34,11 +34,13 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.groups.Tuple.tuple;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -78,12 +80,9 @@ class WireGenerationServiceTest {
         when(template.getTemplateContent()).thenReturn(
                 "<wire><dealer>{{dealerName}}</dealer><net>{{netSettlement}}</net>"
                         + "<valueDate>{{valueDate}}</valueDate></wire>");
-        when(settlementServiceClient.getSettlementDetail(LOAN_ID)).thenReturn(settlementDetail());
-        NotificationDistribution audit = distribution(DistributionType.AUDIT_DISTRIBUTION,
-                "Compliance Audit Team", "compliance-audit@example.com");
-        NotificationDistribution ops = distribution(DistributionType.INTERNAL_OPS_DISTRIBUTION,
-                "Treasury Operations", "treasury-ops@example.com");
-        when(distributionRepository.findAll()).thenReturn(List.of(audit, ops));
+        when(settlementServiceClient.getSettlementDetailAsync(LOAN_ID))
+                .thenReturn(CompletableFuture.completedFuture(settlementDetail()));
+        stubStandingDistributions();
         when(submissionRepository.save(any(WireSubmission.class)))
                 .thenAnswer(invocation -> invocation.getArgument(0));
 
@@ -110,11 +109,13 @@ class WireGenerationServiceTest {
     }
 
     @Test
-    void savesNothingWhenLoanIsNotImported() {
+    void savesNothingAndRethrowsTheClientExceptionWhenLoanIsNotImported() {
         stubTemplateLookup();
-        when(settlementServiceClient.getSettlementDetail(LOAN_ID))
-                .thenThrow(new LoanNotImportedException(LOAN_ID));
+        stubStandingDistributions();
+        when(settlementServiceClient.getSettlementDetailAsync(LOAN_ID))
+                .thenReturn(CompletableFuture.failedFuture(new LoanNotImportedException(LOAN_ID)));
 
+        // Unwrapped: the same exception type as the old blocking client, not a CompletionException
         assertThatThrownBy(() -> service.generate(REQUEST))
                 .isInstanceOf(LoanNotImportedException.class);
 
@@ -122,7 +123,9 @@ class WireGenerationServiceTest {
     }
 
     @Test
-    void failsBeforeCallingSettlementServiceWhenNoTemplateExists() {
+    void cancelsTheSettlementCallWhenNoTemplateExists() {
+        CompletableFuture<SettlementDetailDto> inFlight = new CompletableFuture<>(); // never completes
+        when(settlementServiceClient.getSettlementDetailAsync(LOAN_ID)).thenReturn(inFlight);
         when(templateRepository.findFirstByWireTypeOrderByVersionDesc(WireType.SETTLEMENT))
                 .thenReturn(Optional.empty());
 
@@ -130,7 +133,8 @@ class WireGenerationServiceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("SETTLEMENT");
 
-        verifyNoInteractions(settlementServiceClient, submissionRepository);
+        assertThat(inFlight).isCancelled();
+        verifyNoInteractions(submissionRepository);
     }
 
     // ---------- helpers ----------
@@ -142,11 +146,21 @@ class WireGenerationServiceTest {
         return template;
     }
 
+    /** Both distributions; built before thenReturn (never create mocks inside another stubbing). */
+    private void stubStandingDistributions() {
+        NotificationDistribution audit = distribution(DistributionType.AUDIT_DISTRIBUTION,
+                "Compliance Audit Team", "compliance-audit@example.com");
+        NotificationDistribution ops = distribution(DistributionType.INTERNAL_OPS_DISTRIBUTION,
+                "Treasury Operations", "treasury-ops@example.com");
+        when(distributionRepository.findAll()).thenReturn(List.of(audit, ops));
+    }
+
+    /** lenient(): tests that fail before the recipients are built never read name/email. */
     private static NotificationDistribution distribution(DistributionType type, String name, String email) {
         NotificationDistribution distribution = mock(NotificationDistribution.class);
-        when(distribution.getDistributionType()).thenReturn(type);
-        when(distribution.getName()).thenReturn(name);
-        when(distribution.getEmail()).thenReturn(email);
+        lenient().when(distribution.getDistributionType()).thenReturn(type);
+        lenient().when(distribution.getName()).thenReturn(name);
+        lenient().when(distribution.getEmail()).thenReturn(email);
         return distribution;
     }
 
