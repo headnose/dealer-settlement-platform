@@ -5,10 +5,24 @@ spring:
     url: jdbc:mysql://localhost:3306/wire_db
     username: dsp
     password: dsp
+    hikari:
+      data-source-properties:
+        # P6: Connector/J sends a JDBC batch as ONE multi-row INSERT (without this, a batch is still
+        # one round trip per row). Set here, not in the URL: the URL is overridden for proxy runs.
+        rewriteBatchedStatements: true
+        # P6: trust the driver's own record of autocommit/read-only (kept up to date via the JDBC API)
+        # instead of asking the server "SELECT @@session.transaction_read_only" before every batch.
+        # Safe because nothing here changes session state with raw SQL (SET ... statements).
+        useLocalSessionState: true
   jpa:
     hibernate:
       ddl-auto: validate    # Flyway creates tables; Hibernate only checks they match your entities
     open-in-view: false     # don't keep DB connections open during the web response
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 20    # P6: batch same-table INSERTs (works because IDs are assigned in Java, not IDENTITY)
+        order_inserts: true # P6: group INSERTs by entity so the 4 recipients form one batch
   kafka:
     bootstrap-servers: localhost:9092
     producer:
