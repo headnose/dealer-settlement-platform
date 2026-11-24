@@ -203,13 +203,20 @@ export function teardown(before) {
     const whole = meanMs(before, after, WHOLE);
     const lsc = meanMs(before, after, PARTS[0]);
     const parts = PARTS.map((label) => meanMs(before, after, label));
-    if (whole && parts.every((p) => p)) {
+    // Both lines assume every request made exactly one settlement-service call. With an open circuit
+    // breaker most requests make none, and subtracting the mean of a few slow calls from the mean of all
+    // requests gives a meaningless (even negative) number, so skip them.
+    const sameCount = whole && lsc && whole.count === lsc.count;
+    if (!sameCount) {
+        console.log('  (rest / whole-minus-LSC skipped: not every request made the settlement-service call)');
+    }
+    if (sameCount && parts.every((p) => p)) {
         // Only meaningful for the SEQUENTIAL version: in the parallel one (P1) the LSC call and the reads
         // overlap, so subtracting both counts the overlap twice.
         const rest = whole.mean - parts.reduce((sum, p) => sum + p.mean, 0);
         console.log(`  rest, sequential version only (whole minus all parts): mean ${rest.toFixed(1)} ms per request`);
     }
-    if (whole && lsc) {
+    if (sameCount) {
         // Parallel version: after LSC answers, only merge + save + framework remain on the critical path.
         // Note: repository timers exclude transaction round trips (begin/commit, read-only flag).
         console.log(`  whole minus LSC (parallel critical path after LSC): mean ${(whole.mean - lsc.mean).toFixed(1)} ms per request`);
