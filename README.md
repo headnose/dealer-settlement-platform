@@ -2,7 +2,8 @@
 
 A personal learning project: Java/Spring Boot microservices that model a dealer loan settlement
 and wire-notification workflow. Built to practice microservice design, concurrency, MongoDB/MySQL,
-Kafka, Redis, S3-compatible object storage, and resilience patterns.
+Kafka, Redis, S3-compatible object storage, resilience patterns, and Spring Security (user
+authentication behind a load balancer, role-based access, service-to-service OAuth2 tokens).
 
 **Status:** 🚧 In progress
 
@@ -27,9 +28,15 @@ Finance Ops ──► wire-service ──► Kafka: email-delivery ──► not
                 MySQL└──────────────► S3 (SeaweedFS) ◄──────────┘
 ```
 
+Users reach settlement-service and wire-service through an AWS Application Load Balancer that has
+already logged them in (OIDC) and passes a signed claims header; both services verify that header
+themselves. wire-service gets its own OAuth2 token (client credentials, Keycloak locally) for the
+settlement-service call. See [Authentication and authorization](#authentication-and-authorization).
+
 ## Tech stack
 
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
+Spring Security (OAuth2 resource server and client) · Keycloak ·
 Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
 Spring Boot Actuator + Micrometer · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
 GreenMail · k6 · Toxiproxy
@@ -39,7 +46,7 @@ GreenMail · k6 · Toxiproxy
 Prerequisites: Java 17, Maven, Docker Desktop.
 
 ```bash
-docker compose up -d          # MySQL, MongoDB, Redis (x2), Kafka, Mailpit, SeaweedFS
+docker compose up -d          # MySQL, MongoDB, Redis (x2), Kafka, Mailpit, SeaweedFS, Keycloak
 mvn clean install             # build all modules and run tests
 ```
 
@@ -52,6 +59,7 @@ mvn clean install             # build all modules and run tests
 | `kafka` | 9092 | wire-service, notification-service |
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
+| `keycloak` | 8180 (admin console: admin / admin, local only) | issues wire-service's token for settlement-service (realm `dsp`, imported from `keycloak/dsp-realm.json`) |
 | `toxiproxy` | 8474 (API), 13306, 18082, 18081 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
@@ -74,12 +82,36 @@ Sent emails can be read at http://localhost:8025 (Mailpit). The compose SeaweedF
 
 ### Try it
 
+settlement-service and wire-service answer `401` without a user token. Locally there is no load
+balancer, so a dev tool signs the header the ALB would send. One-time setup of a dev key pair (the
+private key stays in `.local-keys/`, which is git-ignored), then start both services with its
+public key, and mint one token per role:
+
 ```bash
-# Fetch a sample loan from the mock upstream
+mkdir -p .local-keys
+openssl ecparam -name prime256v1 -genkey -noout -out .local-keys/alb-dev-ec.pem
+openssl pkcs8 -topk8 -nocrypt -in .local-keys/alb-dev-ec.pem -out .local-keys/alb-dev-private.pem
+openssl ec -in .local-keys/alb-dev-ec.pem -pubout -out .local-keys/alb-dev-public.pem
+
+# start settlement-service and wire-service with the matching public key
+# (from the IDE: set the same environment variable in both run configurations)
+SECURITY_ALB_PUBLICKEY="$(cat .local-keys/alb-dev-public.pem)" mvn -pl settlement-service spring-boot:run
+SECURITY_ALB_PUBLICKEY="$(cat .local-keys/alb-dev-public.pem)" mvn -pl wire-service spring-boot:run
+
+# tokens (arguments: subject, groups, minutes)
+FINOPS=$(java dev-tools/AlbDevToken.java dev-finops FinanceOps 60)
+ADMIN=$(java dev-tools/AlbDevToken.java dev-admin SettlementAdmin 60)
+```
+
+The tokens are local test credentials: do not paste them into websites that decode JWTs.
+
+```bash
+# Fetch a sample loan from the mock upstream (no security: it stands in for another team's system)
 curl http://localhost:8081/api/v1/loans/LN-1001
 
 # Import several loans concurrently into settlement-service
 curl -X POST http://localhost:8082/api/v1/imports \
+  -H "x-amzn-oidc-data: $FINOPS" \
   -H "Content-Type: application/json" \
   -d '{"loanIds": ["LN-1001", "LN-1002", "LN-1003", "NOPE"]}'
 ```
@@ -140,7 +172,7 @@ A real run with loan-service stopped, importing six unknown loan IDs (so each on
 client):
 
 ```bash
-curl -s -X POST localhost:8082/api/v1/imports -H 'Content-Type: application/json' \
+curl -s -X POST localhost:8082/api/v1/imports -H "x-amzn-oidc-data: $FINOPS" -H 'Content-Type: application/json' \
   -d '{"loanIds":["LN-9001","LN-9002","LN-9003","LN-9004","LN-9005","LN-9006"]}'
 ```
 
@@ -184,6 +216,7 @@ a request gives the same result.
 
 ```bash
 curl -X PATCH http://localhost:8082/api/v1/loans/LN-1001/settlements \
+  -H "x-amzn-oidc-data: $FINOPS" \
   -H "Content-Type: application/json" \
   -d '{"payment": {"paymentMethod": "WIRE", "currency": "USD"},
        "adjustments": [{"adjustmentType": "DEALER_HOLDBACK", "amount": 500.00},
@@ -222,6 +255,7 @@ Errors use RFC 9457 Problem Details (`application/problem+json`). Example 400:
 |---|---|
 | 200 | Settlement calculated |
 | 400 | Malformed JSON or invalid fields (`errors` lists each field and message) |
+| 401 / 403 | No valid user token / not `FinanceOps` (see [roles](#roles-maker-checker)) |
 | 404 | Loan has not been imported |
 | 409 | Concurrent update detected (optimistic locking); reload and retry |
 | 422 | Business rule violated (currency mismatch, negative net) |
@@ -236,7 +270,7 @@ wire-service uses to build notification recipients), the settlement amounts, the
 adjustments.
 
 ```bash
-curl http://localhost:8082/api/v1/loans/LN-1001/settlements
+curl http://localhost:8082/api/v1/loans/LN-1001/settlements -H "x-amzn-oidc-data: $FINOPS"
 ```
 
 ```json
@@ -259,6 +293,7 @@ curl http://localhost:8082/api/v1/loans/LN-1001/settlements
 | Status | When |
 |---|---|
 | 200 | Settlement is calculated |
+| 401 / 403 | No valid token / not `FinanceOps`, `SettlementAdmin` or a service token with `settlement.read` |
 | 404 `Loan not imported` | The loan has not been imported |
 | 404 `Settlement not calculated` | The loan is imported but not calculated yet; retry after calculation |
 
@@ -357,6 +392,7 @@ distributions.
 
 ```bash
 curl -X POST http://localhost:8083/api/v1/wires \
+  -H "x-amzn-oidc-data: $FINOPS" \
   -H "Content-Type: application/json" \
   -d '{"loanId": "LN-1001", "wireType": "SETTLEMENT"}'
 ```
@@ -399,9 +435,11 @@ The merged wire statement is stored in `wire_submission.content`:
 |---|---|
 | 201 | Draft wire created |
 | 400 | Malformed JSON, missing fields, or unknown `wireType` |
+| 401 / 403 | No valid user token / not `FinanceOps` |
 | 422 `Loan not imported` | settlement-service has not imported the loan |
 | 422 `Settlement not calculated` | The loan is imported but its settlement is not calculated yet |
 | 502 | settlement-service is down, timed out (connect 2s, read 5s), returned 5xx, or its circuit breaker is open |
+| 503 `Service authentication unavailable` | wire-service could not get its token from the identity provider; nothing was created, retry later |
 | 500 | Unexpected error, e.g. missing reference data (details are logged, not returned) |
 
 Example 422:
@@ -445,7 +483,7 @@ stores the wire statement in S3, publishes one `EmailDeliveryEvent` per recipien
 asynchronously, so the answer is `202 Accepted`, not `200`.
 
 ```bash
-curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send
+curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send -H "x-amzn-oidc-data: $ADMIN"
 ```
 
 Response (`202 Accepted`):
@@ -493,6 +531,7 @@ How sending stays safe:
 | Status | When |
 |---|---|
 | 202 | Events published, submission is `QUEUED` |
+| 401 / 403 | No valid user token / not `SettlementAdmin` (the maker cannot send) |
 | 404 `Submission not found` | No submission with this ID |
 | 409 `Submission not sendable` | The submission is already `QUEUED` or `SENT`, or another request is sending it |
 | 409 `Wire already sent` | Another submission for the same loan and wire type was already queued or sent |
@@ -547,7 +586,7 @@ curl --aws-sigv4 "aws:amz:us-east-1:s3" --user "dsp-local:dsp-local-secret" \
 
 ```bash
 docker compose stop seaweedfs
-curl -i -X POST http://localhost:8083/api/v1/wires/SUB-…/send
+curl -i -X POST http://localhost:8083/api/v1/wires/SUB-…/send -H "x-amzn-oidc-data: $ADMIN"
 ```
 
 ```
@@ -752,7 +791,7 @@ LN-2001:
 
 ```bash
 docker compose stop mailpit
-curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send      # still 202: delivery is asynchronous
+curl -X POST http://localhost:8083/api/v1/wires/SUB-…/send -H "x-amzn-oidc-data: $ADMIN"   # still 202: delivery is asynchronous
 ```
 
 notification-service tries each email three times, publishes `FAILED`, and dead-letters the
@@ -813,12 +852,121 @@ docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-se
   --group blastmail --topic email-delivery --reset-offsets --to-latest --execute
 ```
 
+## Authentication and authorization
+
+The blueprint puts the user login at the load balancer: an AWS ALB authenticates the user with
+OIDC and forwards the request with signed headers. The services do not trust the network for
+this; each one verifies the header itself, so a request that reaches a service without going
+through the ALB (or with a forged header) gets `401`.
+
+### User requests: the ALB claims header
+
+The ALB sends `x-amzn-oidc-data`, a JWT signed by the ALB (ES256). Both services check it with a
+pre-authentication filter (`AlbHeaderAuthenticationFilter` → `AlbClaimsVerifier`):
+
+- **Algorithm is ES256,** and nothing else, so a token that claims another algorithm (for example
+  `none` or HMAC) is rejected before any key is used
+- **`signer`** in the token header must be this load balancer's ARN (`security.alb.signer`)
+- **`kid`** must name the configured key, and the **signature** must verify with it
+- **Expiry** (`exp`) with 60 s clock skew, and a non-blank `sub`
+- **Groups** from the `groups` claim become roles with the `ROLE_` prefix (`FinanceOps` →
+  `ROLE_FinanceOps`)
+
+The services are stateless: no session and no cookie on their side; every request is checked
+again. A rejected header logs one WARN line with the reason (`Rejected ALB claims: …`), never the
+token.
+
+Settings (`security.alb:` in both `application.yaml` files): `claims-header`, `signer`, `key-id`,
+`groups-claim`, `clock-skew`, `public-key` (PEM). Missing values stop the app at startup.
+
+### Roles (maker-checker)
+
+Two layers. The URL rules deny by default: `/api/v1/**` needs an authenticated caller, Actuator
+`health` and `metrics` are open, everything else is denied. Each endpoint then names its roles
+with `@PreAuthorize`:
+
+| Endpoint | Allowed |
+|---|---|
+| `POST /api/v1/imports` | `FinanceOps` |
+| `PATCH /api/v1/loans/{loanId}/settlements` | `FinanceOps` |
+| `GET /api/v1/loans/{loanId}/settlements` | `FinanceOps`, `SettlementAdmin`, or a service token with scope `settlement.read` |
+| `POST /api/v1/wires` | `FinanceOps` |
+| `POST /api/v1/wires/{submissionId}/send` | `SettlementAdmin` |
+
+Generating a wire and sending it are split between two roles (maker-checker): the user who
+prepares a wire cannot release it. Authorization runs before the lookup, so a user without the
+role gets `403` even for a loan or submission that does not exist (no information about which IDs
+exist).
+
+Errors use the same Problem Details format as the rest of the API:
+
+```json
+{"title": "Unauthorized", "status": 401, "detail": "Authentication required.", "instance": "/api/v1/wires"}
+{"title": "Forbidden", "status": 403, "detail": "You do not have permission for this operation.", "instance": "/api/v1/wires/SUB-…/send"}
+```
+
+### Service to service: wire-service → settlement-service
+
+wire-service calls settlement-service on its own behalf, not with the user's token. It uses the
+OAuth2 client credentials grant against Keycloak (locally; realm `dsp` in
+[`keycloak/dsp-realm.json`](keycloak/dsp-realm.json)):
+
+- **Client** `wire-service`, scope `settlement.read`, audience `settlement-service`, tokens valid
+  5 minutes, signed RS256
+- **wire-service** (`spring-boot-starter-security-oauth2-client`) gets the token through
+  `ServiceTokenFilter` on its WebClient. The token is cached and reused until it expires; a `401`
+  from settlement-service drops it so the next call gets a fresh one. The token call is blocking,
+  so it runs on Reactor's `boundedElastic` scheduler, not on a Netty I/O thread
+- **settlement-service** is an OAuth2 resource server: it checks the issuer, the audience and the
+  signature (keys fetched from Keycloak on first use, so it starts without Keycloak), and the
+  `settlement.read` scope allows only the `GET`. A service token on `PATCH` gets `403`
+- Both kinds of token work side by side in settlement-service: the ALB header for users, a bearer
+  token for services. A bad bearer token gets the same `401` Problem Details as a bad ALB header
+
+Try it by hand (local client secret, never used outside this machine):
+
+```bash
+curl -s -u wire-service:wire-service-local-secret -d grant_type=client_credentials \
+  http://localhost:8180/realms/dsp/protocol/openid-connect/token
+```
+
+**Identity provider down.** With Keycloak stopped, generating a wire answers `503`:
+
+```bash
+docker compose stop keycloak
+curl -i -X POST http://localhost:8083/api/v1/wires -H "x-amzn-oidc-data: $FINOPS" \
+  -H "Content-Type: application/json" -d '{"loanId": "LN-1001", "wireType": "SETTLEMENT"}'
+```
+
+```json
+{"title": "Service authentication unavailable", "status": 503, "detail": "Could not authenticate to settlement-service. No wire was created; try again later.", "instance": "/api/v1/wires"}
+```
+
+In that run settlement-service received no call, the number of `DRAFT`s for LN-1001 was the same
+before and after, and the circuit breaker recorded the call as ignored
+(`resilience4j.circuitbreaker.calls` with `kind:ignored` = 1.0): a missing token says nothing
+about settlement-service's health, so it must not open the breaker. After
+`docker compose start keycloak`, the same request answered `201` without restarting wire-service.
+If settlement-service itself rejects the token (`401` / `403`), that is a configuration error, so
+wire-service answers `500` and logs it.
+
+Tests: `AlbClaimsVerifierTest` signs real tokens with a test key pair (valid, wrong signature,
+wrong algorithm, wrong signer, unknown key ID, expired, missing subject); the controller tests send
+signed headers through the real `SecurityConfig` and check 401, 403 and the role matrix, plus
+service tokens (`jwt()` from spring-security-test); `ServiceTokenFilterTest` and
+`SettlementServiceClientTest` check that the bearer token is sent, that a 401 drops the cached
+token, and that an identity provider failure becomes the 503 exception without calling
+settlement-service.
+
 ## Load test: wire generation
 
 The blueprint's "Challenge" says wire generation was slow because wire-service loaded the template
 from MySQL and *then* called settlement-service, two independent steps one after the other, and that
 running them in parallel with WebClient fixed it. This section measures that claim on this project
 instead of repeating it. All numbers below come from my own runs; none come from the blueprint.
+
+The load tests were run before Spring Security was added. The scripts now send a user token
+(`-e TOKEN=...`, minted as in [Try it](#try-it)); the numbers below were not re-measured with it.
 
 ### Setup
 
@@ -862,8 +1010,9 @@ curl -X POST localhost:8474/proxies/settlement-service/toxics -H "Content-Type: 
 curl -X POST localhost:8474/proxies/mysql/toxics -H "Content-Type: application/json" \
   -d '{"name":"mysql_latency","type":"latency","stream":"downstream","attributes":{"latency":20,"jitter":0}}'
 
-k6 run -e RATE=5 -e DURATION=20s load-test/wire-generation.js     # warm-up, not reported
-k6 run -e RATE=20 -e DURATION=60s load-test/wire-generation.js    # measured
+FINOPS=$(java dev-tools/AlbDevToken.java dev-finops FinanceOps 120)
+k6 run -e TOKEN="$FINOPS" -e RATE=5 -e DURATION=20s load-test/wire-generation.js     # warm-up, not reported
+k6 run -e TOKEN="$FINOPS" -e RATE=20 -e DURATION=60s load-test/wire-generation.js    # measured
 ```
 
 ### Results
@@ -1040,7 +1189,7 @@ docker compose up -d toxiproxy
 java -jar wire-service/target/wire-service-0.1.0-SNAPSHOT.jar --clients.settlement-service.base-url=http://localhost:18082
 curl -X POST localhost:8474/proxies/settlement-service/toxics -H "Content-Type: application/json" \
   -d '{"name":"lsc_latency","type":"latency","stream":"downstream","attributes":{"latency":6000,"jitter":0}}'
-k6 run -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=900 -e MAX_VUS=1200 load-test/wire-generation.js
+k6 run -e TOKEN="$FINOPS" -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=900 -e MAX_VUS=1200 load-test/wire-generation.js
 ```
 
 ### Results
@@ -1204,10 +1353,10 @@ when loan-service is slow. Every number comes from my own runs (2026-11-24, same
 ```bash
 docker compose up -d toxiproxy
 java -jar settlement-service/target/settlement-service-0.1.0-SNAPSHOT.jar --clients.loan-service.base-url=http://localhost:18081
-k6 run -e RATE=2 -e DURATION=20s load-test/loan-import.js     # warm-up, no toxic, not reported
+k6 run -e TOKEN="$FINOPS" -e RATE=2 -e DURATION=20s load-test/loan-import.js     # warm-up, no toxic, not reported
 curl -s -X POST localhost:8474/proxies/loan-service/toxics -H 'Content-Type: application/json' \
   -d '{"name":"loan_latency","type":"latency","stream":"downstream","attributes":{"latency":4000,"jitter":0}}'
-k6 run -e RATE=2 -e DURATION=60s load-test/loan-import.js     # measured
+k6 run -e TOKEN="$FINOPS" -e RATE=2 -e DURATION=60s load-test/loan-import.js     # measured
 curl -s -X DELETE localhost:8474/proxies/loan-service/toxics/loan_latency
 ```
 
@@ -1495,6 +1644,15 @@ Written down before each run.
       inside a normal `200` instead of a `500` for the whole request, and the request waits for the
       tasks it started instead of leaving them as orphans; I2 re-run as I5: 111 → 0 `500`s, every
       loan-service call reported to a user (194 = 194)
+- [x] Spring Security in settlement-service and wire-service: ALB claims header verified in the
+      service (ES256 signature, signer ARN, key ID, expiry), groups mapped to roles, deny-by-default
+      URL rules plus `@PreAuthorize` per endpoint, maker-checker (`FinanceOps` generates,
+      `SettlementAdmin` sends), 401/403 as Problem Details; verified end to end (valid token, forged
+      signature, wrong role)
+- [x] Service-to-service auth: wire-service gets a client-credentials token from Keycloak (cached,
+      dropped on a 401) and settlement-service accepts it as a resource server (issuer, audience,
+      `settlement.read` for `GET` only); identity provider down → 503 with no draft created and the
+      breaker untouched; verified end to end (Workflow 3 with two identities)
 
 ## Roadmap
 
@@ -1507,10 +1665,12 @@ Written down before each run.
 - [x] Import: a rejected task no longer turns the whole request into a `500`; the affected loans get
       `IMPORT_CAPACITY_EXCEEDED`, and tasks already started are waited for rather than cancelled
       (cancelling would not stop a running task), so no orphaned imports run
+- [x] Spring Security: ALB user authentication, roles and maker-checker, OAuth2 client credentials
+      between wire-service and settlement-service
 - [ ] Logging: one line per breaker state change instead of one WARN per loan while it is open
 - [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
-- [ ] Observability: Prometheus, Grafana, OpenTelemetry
+- [ ] Observability: Prometheus, Grafana, OpenTelemetry (next)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
 - [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
@@ -1617,3 +1777,20 @@ Written down before each run.
   (automatic transition is off); while half-open, requests beyond the 2 trial calls get an immediate `502`
 - Each timed-out settlement-service call logs two WARN lines (Netty's `ReadTimeoutException` and the
   handler's message): about 2 lines per request during an outage
+- CSRF protection is disabled. The services are stateless and read no cookies themselves, but the
+  ALB login is cookie-based, so a real deployment needs CSRF protection or `SameSite` cookies at
+  the ALB
+- The services check the ALB header against one configured public key. In AWS the ALB publishes
+  its keys by key ID (`https://public-keys.auth.elb.<region>.amazonaws.com/<kid>`) and rotates them;
+  that lookup is not built
+- Maker-checker is enforced by role only: a user with both `FinanceOps` and `SettlementAdmin` could
+  generate and send the same wire (there is no "created by" check)
+- Actuator `health` and `metrics` are open without a token (the load tests read them); they must not
+  be reachable through the public load balancer
+- settlement-service's calls to loan-service carry no service token (loan-service is a mock of
+  another team's system)
+- wire-service caches its token in memory per instance; each instance gets its own token
+- The committed `security.alb.public-key` is a dev key whose private half is not in the repository;
+  each developer generates a pair and passes the public key at startup (see [Try it](#try-it))
+- The Keycloak client secret and admin password have local-only defaults (`wire-service-local-secret`,
+  admin / admin); in AWS they would come from Secrets Manager or environment variables
