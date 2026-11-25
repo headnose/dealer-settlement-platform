@@ -93,6 +93,22 @@ services:
       - "8333:8333"                    # S3 API (apps and curl talk to this)
       - "23646:23646"                  # Admin UI: http://localhost:23646
 
+  # Local identity provider for service-to-service auth (blueprint step 5: OAuth 2.0 client credentials).
+  # Stands in for the company IdP (AWS: Cognito, Okta, ...); the apps only know its issuer URL.
+  # Realm (client wire-service, scope settlement.read) imported from keycloak/dsp-realm.json on startup.
+  # start-dev = plain HTTP + built-in dev database: local only, never for production.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    container_name: dsp-keycloak
+    command: [ "start-dev", "--import-realm" ]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin   # admin console, local dev only
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      - "8180:8080"                    # token endpoint + admin UI: http://localhost:8180
+
   # Load tests only: TCP proxy that injects latency between a service and its dependencies
   # (wire-service -> MySQL / settlement-service, settlement-service -> loan-service).
   # Not started by a plain `docker compose up -d` (profile); start with `docker compose up -d toxiproxy`.
