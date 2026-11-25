@@ -83,6 +83,13 @@
             <artifactId>spring-security-oauth2-jose</artifactId>
         </dependency>
 
+        <!-- Blueprint step 5: service-to-service calls carry an OAuth2 access token (client credentials).
+     Verified here as a resource server: signature via the IdP's JWKS, issuer, expiry, audience. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-mongodb-test</artifactId>

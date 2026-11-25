@@ -31,10 +31,11 @@ public class SettlementController {
 
     /**
      * Settlement detail for downstream services such as wire-service (blueprint: SettlementDetailDto).
-     * Read access for both roles; wire-service's own service credential is added with service-to-service auth.
+     * Users: both roles. Services: a client-credentials token with scope settlement.read (wire-service);
+     * that scope opens this endpoint only, never PATCH or import (least privilege).
      */
     @GetMapping
-    @PreAuthorize("hasAnyRole('FinanceOps', 'SettlementAdmin')")
+    @PreAuthorize("hasAnyRole('FinanceOps', 'SettlementAdmin') or hasAuthority('SCOPE_settlement.read')")
     public SettlementDetailDto getSettlement(@PathVariable String loanId) {
         return SettlementDetailDto.from(settlementService.getSettlementDetail(loanId));
     }

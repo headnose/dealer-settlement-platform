@@ -11,6 +11,15 @@ spring:
       # 10s connect timeout) would turn a Redis outage into very slow GETs. Starting values.
       timeout: 500ms
       connect-timeout: 500ms
+  # Blueprint step 5: tokens from the IdP (local Keycloak realm dsp; AWS: the company IdP). Boot reads the
+  # IdP's keys from issuer-uri/.well-known lazily on the first Bearer request, so the app starts without it.
+  # audiences: a token issued for another API is rejected here.
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: http://localhost:8180/realms/dsp
+          audiences: settlement-service
 
 server:
   port: 8082
