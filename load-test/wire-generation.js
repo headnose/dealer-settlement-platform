@@ -7,14 +7,14 @@
 // Start wire-service from the packaged jar for every measured run (no IDE/plugin JIT flags):
 //   java -jar wire-service/target/wire-service-0.1.0-SNAPSHOT.jar
 // Warm-up (JIT, Hibernate query plans, pool connections), not reported:
-//   k6 run -e RATE=5 -e DURATION=20s load-test/wire-generation.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=5 -e DURATION=20s load-test/wire-generation.js
 // Measured run:
-//   k6 run -e RATE=20 -e DURATION=60s load-test/wire-generation.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=20 -e DURATION=60s load-test/wire-generation.js
 // Timeout runs (slow settlement-service through Toxiproxy): every request is EXPECTED to fail with
 // 502, and many requests are in flight at once (rate x latency), so pre-allocate enough VUs:
-//   k6 run -e RATE=20 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=150 load-test/wire-generation.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=20 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=150 load-test/wire-generation.js
 // Saturation run (more requests in flight than Tomcat has threads):
-//   k6 run -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=400 -e MAX_VUS=1000 load-test/wire-generation.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=50 -e DURATION=60s -e EXPECT_STATUS=502 -e PRE_VUS=400 -e MAX_VUS=1000 load-test/wire-generation.js
 //
 // Every 201 creates a DRAFT submission + 4 recipients in local wire_db (decision D5); a 502 saves
 // nothing.
@@ -33,6 +33,14 @@ const PRE_VUS = parseInt(__ENV.PRE_VUS || '20', 10);
 // Upper limit of concurrent requests k6 may hold open. If the server queues requests, in-flight grows
 // past rate x latency; raise this so a full server shows up as latency, not as k6 dropping iterations.
 const MAX_VUS = parseInt(__ENV.MAX_VUS || '300', 10);
+// User token (x-amzn-oidc-data, the header the ALB sends) with role FinanceOps; the API answers 401
+// without it. Mint it from the project root (local dev key, valid 60 min by default):
+//   FINOPS=$(java dev-tools/AlbDevToken.java dev-finops FinanceOps 60)
+// Actuator health and metrics need no token. A run that outlives the token gets 401s and fails its checks.
+const TOKEN = __ENV.TOKEN;
+if (!TOKEN) {
+    throw new Error('TOKEN is not set: run with -e TOKEN="$FINOPS" (see the comment above)');
+}
 
 export const options = {
     scenarios: {
@@ -140,7 +148,7 @@ export function setup() {
 
 const payload = JSON.stringify({ loanId: LOAN_ID, wireType: 'SETTLEMENT' });
 const params = {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-amzn-oidc-data': TOKEN },
     tags: { name: 'POST /api/v1/wires' },
     // Only EXPECT_STATUS counts as success in http_req_failed (k6 treats 4xx/5xx as failed by default).
     responseCallback: http.expectedStatuses(EXPECT_STATUS),
