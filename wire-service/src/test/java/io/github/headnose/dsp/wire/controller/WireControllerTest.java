@@ -3,14 +3,25 @@ package io.github.headnose.dsp.wire.controller;
 import io.github.headnose.dsp.wire.client.LoanNotImportedException;
 import io.github.headnose.dsp.wire.client.SettlementNotCalculatedException;
 import io.github.headnose.dsp.wire.client.SettlementServiceUnavailableException;
+import io.github.headnose.dsp.wire.controller.dto.SubmissionStatusDto;
 import io.github.headnose.dsp.wire.controller.dto.WireGenerationRequestDto;
 import io.github.headnose.dsp.wire.entity.WireSubmission;
+import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
 import io.github.headnose.dsp.wire.model.RecipientType;
+import io.github.headnose.dsp.wire.model.SubmissionStatus;
 import io.github.headnose.dsp.wire.model.WireType;
+import io.github.headnose.dsp.wire.security.AlbTestSecurityConfig;
+import io.github.headnose.dsp.wire.security.AlbTestTokens;
+import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
+import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
+import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
 import io.github.headnose.dsp.wire.service.WireGenerationService;
+import io.github.headnose.dsp.wire.service.WireSendService;
+import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -30,16 +41,9 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-import io.github.headnose.dsp.wire.controller.dto.SubmissionStatusDto;
-import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
-import io.github.headnose.dsp.wire.model.SubmissionStatus;
-import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
-import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
-import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
-import io.github.headnose.dsp.wire.service.WireSendService;
-import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
 
 @WebMvcTest(WireController.class)
+@Import(AlbTestSecurityConfig.class)
 class WireControllerTest {
 
     private static final String URL = "/api/v1/wires";
@@ -47,6 +51,7 @@ class WireControllerTest {
     private static final String VALID_BODY = """
             {"loanId": "LN-1001", "wireType": "SETTLEMENT"}
             """;
+    private static final String SUBMISSION_ID = "SUB-1";
 
     @Autowired
     private MockMvc mockMvc;
@@ -54,20 +59,30 @@ class WireControllerTest {
     @MockitoBean
     private WireGenerationService wireGenerationService;
 
+    // @WebMvcTest builds the real WireController, which needs both services.
+    @MockitoBean
+    private WireSendService wireSendService;
+
+    /** Generate as the maker (FinanceOps). */
     private ResultActions postWire(String body) throws Exception {
+        return postWireAs(AlbTestTokens.forGroups("FinanceOps"), body);
+    }
+
+    private ResultActions postWireAs(String token, String body) throws Exception {
         return mockMvc.perform(post(URL)
+                .header(AlbTestTokens.HEADER, token)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body));
     }
 
-    private static final String SUBMISSION_ID = "SUB-1";
-
-    // @WebMvcTest builds the real WireController, which now needs both services.
-    @MockitoBean
-    private WireSendService wireSendService;
-
+    /** Send as the checker (SettlementAdmin). */
     private ResultActions postSend(String submissionId) throws Exception {
-        return mockMvc.perform(post(URL + "/{submissionId}/send", submissionId));
+        return postSendAs(AlbTestTokens.forGroups("SettlementAdmin"), submissionId);
+    }
+
+    private ResultActions postSendAs(String token, String submissionId) throws Exception {
+        return mockMvc.perform(post(URL + "/{submissionId}/send", submissionId)
+                .header(AlbTestTokens.HEADER, token));
     }
 
     private static WireSubmission draftWithRecipients() {
@@ -256,5 +271,36 @@ class WireControllerTest {
                 .andExpect(jsonPath("$.title").value("Wire statement storage unavailable"))
                 .andExpect(content().string(not(containsString("s3://"))))
                 .andExpect(content().string(not(containsString("8333"))));
+    }
+
+    // ---------- security ----------
+
+    @Test
+    void generateWithoutTokenIs401ProblemDetail() throws Exception {
+        mockMvc.perform(post(URL).contentType(MediaType.APPLICATION_JSON).content(VALID_BODY))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Unauthorized"));
+
+        verifyNoInteractions(wireGenerationService);
+    }
+
+    /** Maker-checker: the person who prepares a wire cannot release it to the dealer's bank. */
+    @Test
+    void financeOpsCannotSend() throws Exception {
+        postSendAs(AlbTestTokens.forGroups("FinanceOps"), SUBMISSION_ID)
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Forbidden"));
+
+        verifyNoInteractions(wireSendService);
+    }
+
+    @Test
+    void settlementAdminCannotGenerate() throws Exception {
+        postWireAs(AlbTestTokens.forGroups("SettlementAdmin"), VALID_BODY)
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(wireGenerationService);
     }
 }
