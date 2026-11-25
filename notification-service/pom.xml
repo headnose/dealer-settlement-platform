@@ -67,6 +67,13 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!-- O2: distributed tracing. Boot 4's own OpenTelemetry starter: OpenTelemetry SDK + Micrometer
+     Tracing bridge + OTLP exporter (traces pushed to Jaeger). Version managed by Boot. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
+        </dependency>
+
         <!-- @Validated on StorageProperties: fail at startup if storage settings are missing -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

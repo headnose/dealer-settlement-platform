@@ -103,6 +103,7 @@ storage:
   api-call-timeout: 5s                # whole call incl. SDK retries (starting values, check in load test)
 
 # Actuator: health, metrics (load tests) and prometheus (O1: scraped by the local Prometheus).
+# Actuator: health, metrics (load tests) and prometheus (O1: scraped by the local Prometheus).
 management:
   endpoints:
     web:
@@ -115,6 +116,22 @@ management:
       percentiles-histogram:
         http.server.requests: true
         http.client.requests: true   # the settlement-service call (WebClient)
+  # O2 (G4): trace every request locally (Boot default 0.1). Production would sample less.
+  tracing:
+    sampling:
+      probability: 1.0
+  # O2: export spans over OTLP/HTTP to the local Jaeger (no default endpoint in Boot 4.1).
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+  # O2: the OpenTelemetry starter also brings Micrometer's OTLP metrics registry (enabled by default,
+  # pushes to localhost:4318 = Jaeger). Metrics are already pulled by Prometheus: turn the push off.
+  otlp:
+    metrics:
+      export:
+        enabled: false
 # Blueprint "Identity Propagation": same ALB (path-based routing) in front of LSC and PWT, so the same
 # signer and key as settlement-service. Locally our dev key pair stands in for the ALB's key (private key in
 # .local-keys/, never committed; a public key is not a secret). In AWS: keys fetched by kid (not built).
