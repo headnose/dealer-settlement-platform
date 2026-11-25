@@ -93,7 +93,8 @@ services:
       - "8333:8333"                    # S3 API (apps and curl talk to this)
       - "23646:23646"                  # Admin UI: http://localhost:23646
 
-  # Load tests only: TCP proxy that injects latency between wire-service and its dependencies.
+  # Load tests only: TCP proxy that injects latency between a service and its dependencies
+  # (wire-service -> MySQL / settlement-service, settlement-service -> loan-service).
   # Not started by a plain `docker compose up -d` (profile); start with `docker compose up -d toxiproxy`.
   # Proxies come from load-test/toxiproxy.json with NO latency; toxics are added/removed via the API.
   # Docker Hub's shopify/toxiproxy is deprecated: images are on GitHub Container Registry.
@@ -105,13 +106,14 @@ services:
     volumes:
       - ./load-test/toxiproxy.json:/config/toxiproxy.json:ro
     extra_hosts:
-      - "host.docker.internal:host-gateway"   # the Mac, where settlement-service runs
+      - "host.docker.internal:host-gateway"   # the Mac, where settlement-service and loan-service run
     depends_on:
       - mysql
     ports:
       - "8474:8474"                    # Toxiproxy API (add/remove toxics)
       - "13306:13306"                  # -> mysql:3306
       - "18082:18082"                  # -> settlement-service on the Mac (8082)
+      - "18081:18081"                  # -> loan-service on the Mac (8081)
 
 volumes:
   mysql-data:
