@@ -38,7 +38,7 @@ settlement-service call. See [Authentication and authorization](#authentication-
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
 Spring Security (OAuth2 resource server and client) · Keycloak ·
 Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
-Spring Boot Actuator + Micrometer · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
+Spring Boot Actuator + Micrometer · Prometheus · Grafana · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
 GreenMail · k6 · Toxiproxy
 
 ## Running locally
@@ -61,6 +61,8 @@ mvn clean install             # build all modules and run tests
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
 | `keycloak` | 8180 (admin console: admin / admin, local only) | issues wire-service's token for settlement-service (realm `dsp`, imported from `keycloak/dsp-realm.json`) |
 | `toxiproxy` | 8474 (API), 13306, 18082, 18081 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
+| `prometheus` | 9090 | scrapes the services' metrics (profile `observability`, not started by `up -d`; see [Observability](#observability-part-1-metrics-prometheus--grafana)) |
+| `grafana` | 3000 (admin / admin, local only) | the DSP Overview dashboard (profile `observability`) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
@@ -882,7 +884,7 @@ Settings (`security.alb:` in both `application.yaml` files): `claims-header`, `s
 ### Roles (maker-checker)
 
 Two layers. The URL rules deny by default: `/api/v1/**` needs an authenticated caller, Actuator
-`health` and `metrics` are open, everything else is denied. Each endpoint then names its roles
+`health`, `metrics` and `prometheus` are open, everything else is denied. Each endpoint then names its roles
 with `@PreAuthorize`:
 
 | Endpoint | Allowed |
@@ -1577,6 +1579,112 @@ Written down before each run.
 - The latency toxic has no jitter, so every slow call takes exactly the same time; I5 shows this changes
   how freed slots are shared between requests.
 
+## Observability, part 1: metrics (Prometheus + Grafana)
+
+The blueprint's "Monitoring" lists Prometheus for metrics, Grafana for dashboards and Spring Boot
+Actuator for the application side, and names what to watch: request latency (p50/p95/p99), error
+rates, JVM, thread pools and Kafka consumer lag. This part builds that locally. Tracing
+(OpenTelemetry) and structured logs come next (see Roadmap).
+
+### What was built
+
+- **Every service with an API or a consumer publishes metrics** at `/actuator/prometheus`
+  (`micrometer-registry-prometheus`, version from Boot): settlement-service, wire-service, and
+  notification-service, which gets Actuator for the first time. notification-service has no REST API,
+  but it owns the Kafka consumer whose lag the blueprint wants watched, and lag is measured by the
+  consumer itself (the Kafka client reports how far it is behind the end of each partition).
+  loan-service is a mock of another team's system and is not scraped.
+- **Prometheus pulls.** Every 5 s it GETs each service's `/actuator/prometheus`; the services do not
+  know Prometheus exists. A service that stops answering shows up as `up == 0`. Prometheus runs in
+  Docker and the services on the Mac, so the targets are `host.docker.internal:8082/8083/8084`, the
+  same route Toxiproxy uses ([`observability/prometheus/prometheus.yml`](observability/prometheus/prometheus.yml)).
+- **Percentiles come from histogram buckets.** `management.metrics.distribution.percentiles-histogram`
+  is on for `http.server.requests` (and `http.client.requests` in wire-service, the
+  settlement-service call), so each service publishes counts per latency bucket and Prometheus
+  computes p50/p95/p99 with `histogram_quantile`. Percentiles calculated inside the app cannot be
+  combined across instances or time windows (two p95s cannot be averaged); bucket counts can be added
+  up. The price: a percentile is an estimate within a bucket, not an exact value.
+- **Grafana is configured from files in git** ([`observability/grafana/provisioning`](observability/grafana/provisioning)):
+  the Prometheus data source (`http://prometheus:9090`, the compose service name, with a fixed `uid`
+  and `timeInterval: 5s` to match the scrape interval) and the dashboard JSON. A fresh container needs
+  no clicking; edits in the UI cannot be saved (`allowUiUpdates: false`), the JSON file is the source
+  of truth.
+- **Both run behind the compose profile `observability`**, like Toxiproxy's `load-test`, so a plain
+  `docker compose up -d` stays as light as before. Images: `prom/prometheus:v3.13.5` (the 3.13
+  long-term-support line) and `grafana/grafana:13.3.1` (the `grafana-oss` repository is no longer
+  updated).
+- **Security:** `/actuator/prometheus` is added to the `permitAll` rule next to `health` and
+  `metrics` in both services, because the scraper sends no user token; every other Actuator path is
+  still denied (see Known limitations).
+
+### The DSP Overview dashboard
+
+16 panels in six rows ([`dsp-overview.json`](observability/grafana/provisioning/dashboards/dsp-overview.json)).
+Every query uses metric names checked against the services' real `/actuator/prometheus` output
+first (a wrong name gives an empty panel, not an error); the panel descriptions (the ⓘ icon) explain
+what each one means in this project.
+
+| Row | Panels |
+|---|---|
+| Overview | services up, request rate, 5xx error ratio (API paths only, without `/actuator`) |
+| Latency | p50/p95/p99 per service, p95 per endpoint, wire-service → settlement-service call p95, Kafka listener time |
+| Threads and pools | Tomcat busy vs max, `loanImportExecutor` active/queued/pool size, Hikari active/pending |
+| Resilience | circuit breakers not closed, calls rejected by an open breaker |
+| Kafka | consumer lag per topic (both consumers: notification-service on `email-delivery`, wire-service on `delivery-status`) |
+| JVM | heap used, time in GC pauses, process CPU |
+
+The 5xx panel first showed "No data" instead of 0%: a status that never occurred has no series at
+all, so 5xx / total returns nothing. The query is now `(5xx rate or total rate * 0) / total rate`,
+which fills in a zero series per service, and its axis is fixed at 0-100% (with all-zero data
+Grafana picked a scale of up to 10,000%).
+
+### Try it
+
+```bash
+docker compose --profile observability up -d     # everything plus prometheus and grafana
+# or, if the rest is already running:
+docker compose up -d prometheus grafana
+
+curl -s 'localhost:9090/api/v1/query?query=up'   # one result per service, value "1"
+```
+
+- Prometheus targets: http://localhost:9090/targets
+- Dashboard: http://localhost:3000/d/dsp-overview (admin / admin, local only)
+
+Neither container has a volume: `docker compose down` deletes the collected metrics.
+
+### Evidence: an outage the error rate does not show
+
+Three k6 runs on 2026-11-25 (services started with `mvn spring-boot:run`, not the measured `java -jar`
+setup of the load tests, so the latencies are not comparable with those tables):
+
+| Time | Run | Result | Dashboard |
+|---|---|---|---|
+| 14:57 | import, 2 req/s × 6 unknown loans, **loan-service not running** | 121 × `200`, all 726 loans `LOAN_SERVICE_UNAVAILABLE`; 16 calls went out and failed (mean 3.4 ms), 720 were rejected by the open breaker | 5xx ratio **0%**; breaker `loanService open`; ~12 rejected calls/s |
+| 14:59 | wire generation, 5 req/s for 60 s | 301 × `201`, server mean 32.9 ms (settlement-service call 14.3 ms), Hikari pending 0 | request rate 5/s on both services; the 914 ms first request shows as a p99 spike |
+| 15:02 | import again, loan-service running, settlement-service **not** restarted | 722 `NOT_FOUND`, 4 `LOAN_SERVICE_UNAVAILABLE`, 0 failed calls (mean 2.1 ms), executor queued/active 0 afterwards | breaker closed again; small blip of rejected calls |
+
+- **The error rate stayed at 0% during a complete import outage.** The import answers `200` with a
+  per-loan outcome, so the failure was only visible in the Resilience row. One global error number
+  would have missed it; the right signal depends on the endpoint.
+- **The breaker stayed open from about 14:57 to 15:01**, long after the outage run ended at 14:58:
+  automatic transition is off, so it moves to half-open only when the next call arrives. That call
+  was the first batch of the 15:02 run: 2 trial calls went through (`NOT_FOUND`, a success), the other
+  4 loans of that batch were rejected, and the breaker closed. The same pattern as the manual check in
+  [Loan-service calls](#loan-service-calls-timeouts-and-circuit-breaker).
+- The wire run left 301 drafts (1,204 recipients) in local `wire_db`, deleted afterwards (count first,
+  4:1 ratio checked).
+
+### Tests
+
+The rule that matters is in `SecurityConfig`, so it is tested where the real `SecurityConfig` already
+runs: the `@WebMvcTest` controller tests of both services (`AlbTestSecurityConfig`). `GET
+/actuator/prometheus` without a token is neither `401` nor `403` (the web slice has no Actuator, so
+the request ends after security), and `GET /actuator/env` without a token is a `401` Problem Details.
+Removing the path from `permitAll` makes the first test fail with `401`, checked once by hand.
+Not a `@SpringBootTest`: Boot's test support turns metrics export off there by default, and an extra
+annotation would start a second context with its own MySQL, Kafka and SeaweedFS containers.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -1653,6 +1761,10 @@ Written down before each run.
       dropped on a 401) and settlement-service accepts it as a resource server (issuer, audience,
       `settlement.read` for `GET` only); identity provider down → 503 with no draft created and the
       breaker untouched; verified end to end (Workflow 3 with two identities)
+- [x] Observability, part 1: `/actuator/prometheus` in settlement-service, wire-service and
+      notification-service, latency histograms, Prometheus (5 s pull) and Grafana provisioned from git
+      (profile `observability`) with a 16-panel dashboard; verified with an import outage that the
+      error rate does not show and the breaker panels do
 
 ## Roadmap
 
@@ -1670,7 +1782,9 @@ Written down before each run.
 - [ ] Logging: one line per breaker state change instead of one WARN per loan while it is open
 - [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
-- [ ] Observability: Prometheus, Grafana, OpenTelemetry (next)
+- [x] Observability, part 1: metrics (Prometheus, Grafana, dashboard)
+- [ ] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka (next)
+- [ ] Observability, part 3: structured JSON logs with trace IDs and business fields (ELK optional)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
 - [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
@@ -1762,7 +1876,7 @@ Written down before each run.
 - Reactor Netty logs an ERROR on macOS about a missing native DNS resolver
   (`netty-resolver-dns-native-macos`) and falls back to the JDK resolver; harmless here, not added
   because it is a platform-specific dependency
-- Actuator runs on the API port (`health`, `metrics` only); in a real deployment it must not be
+- Actuator runs on the API port (`health`, `metrics`, `prometheus` only); in a real deployment it must not be
   reachable through the public load balancer. It also shares the request threads: when they were all
   busy (T3), Actuator calls queued with everything else (a separate `management.server.port` would
   give it its own)
@@ -1785,8 +1899,8 @@ Written down before each run.
   that lookup is not built
 - Maker-checker is enforced by role only: a user with both `FinanceOps` and `SettlementAdmin` could
   generate and send the same wire (there is no "created by" check)
-- Actuator `health` and `metrics` are open without a token (the load tests read them); they must not
-  be reachable through the public load balancer
+- Actuator `health`, `metrics` and `prometheus` are open without a token (the load tests and the
+  Prometheus scraper read them); they must not be reachable through the public load balancer
 - settlement-service's calls to loan-service carry no service token (loan-service is a mock of
   another team's system)
 - wire-service caches its token in memory per instance; each instance gets its own token
@@ -1794,3 +1908,13 @@ Written down before each run.
   each developer generates a pair and passes the public key at startup (see [Try it](#try-it))
 - The Keycloak client secret and admin password have local-only defaults (`wire-service-local-secret`,
   admin / admin); in AWS they would come from Secrets Manager or environment variables
+- Prometheus and Grafana have no volumes: `docker compose down` deletes the collected metrics; Grafana
+  admin / admin is local only; dashboard changes must be made in the JSON file, not in the UI
+- Percentiles on the dashboard are estimates within a histogram bucket, not exact values
+- No alerting rules yet: the dashboard shows problems, nothing notifies anyone (the blueprint uses
+  CloudWatch for alerting)
+- settlement-service builds its loan-service client with the static `RestClient.builder()`, so that call
+  has no `http.client.requests` metrics (the breaker's call timer is used instead)
+- loan-service is not scraped (it is a mock of another team's system and has no Actuator)
+- The 5 s scrape interval is a local choice for short load-test runs; 15-30 s is more usual, because
+  every scrape costs storage
