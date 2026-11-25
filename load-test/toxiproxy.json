@@ -10,5 +10,11 @@
     "listen": "0.0.0.0:18082",
     "upstream": "host.docker.internal:8082",
     "enabled": true
+  },
+  {
+    "name": "loan-service",
+    "listen": "0.0.0.0:18081",
+    "upstream": "host.docker.internal:8081",
+    "enabled": true
   }
 ]
