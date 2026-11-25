@@ -16,10 +16,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -32,6 +35,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -77,6 +81,13 @@ class SettlementControllerTest {
 
     private ResultActions getSettlementAs(String token) throws Exception {
         return mockMvc.perform(get(URL, LOAN_ID).header(AlbTestTokens.HEADER, token));
+    }
+
+    /** wire-service's client-credentials token as the resource server sees it after verification. */
+    private static RequestPostProcessor wireServiceToken() {
+        return jwt()
+                .jwt(token -> token.subject("service-account-wire-service").claim("azp", "wire-service"))
+                .authorities(new SimpleGrantedAuthority("SCOPE_settlement.read"));
     }
 
     private static LoanSettlementDocument calculatedDocument() {
@@ -256,7 +267,7 @@ class SettlementControllerTest {
                 .andExpect(jsonPath("$.loanId").value(LOAN_ID));
     }
 
-    // ---------- security ----------
+    // ---------- security: users (ALB claims) ----------
 
     @Test
     void getWithoutTokenIs401ProblemDetail() throws Exception {
@@ -302,6 +313,41 @@ class SettlementControllerTest {
     void userWithoutGroupsIs403() throws Exception {
         getSettlementAs(AlbTestTokens.forGroups())
                 .andExpect(status().isForbidden());
+
+        verifyNoInteractions(settlementService);
+    }
+
+    // ---------- security: services (blueprint step 5, client credentials) ----------
+
+    @Test
+    void wireServiceTokenCanReadSettlement() throws Exception {
+        when(settlementService.getSettlementDetail(LOAN_ID))
+                .thenReturn(CachedSettlementDetail.from(calculatedDocument()));
+
+        mockMvc.perform(get(URL, LOAN_ID).with(wireServiceToken()))
+                .andExpect(status().isOk());
+    }
+
+    /** Least privilege: settlement.read opens the GET only. A leaked service token cannot change money. */
+    @Test
+    void wireServiceTokenCannotCalculate() throws Exception {
+        mockMvc.perform(patch(URL, LOAN_ID)
+                        .with(wireServiceToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(VALID_BODY))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.title").value("Forbidden"));
+
+        verifyNoInteractions(settlementService);
+    }
+
+    /** A Bearer token that fails verification goes through OUR entry point: ProblemDetail, not Spring's empty 401. */
+    @Test
+    void invalidBearerTokenIs401ProblemDetail() throws Exception {
+        mockMvc.perform(get(URL, LOAN_ID).header(HttpHeaders.AUTHORIZATION, "Bearer not-a-real-token"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Unauthorized"));
 
         verifyNoInteractions(settlementService);
     }

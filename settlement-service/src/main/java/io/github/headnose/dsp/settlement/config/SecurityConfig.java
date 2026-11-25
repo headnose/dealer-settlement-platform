@@ -6,21 +6,25 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.AccessDeniedHandler;
 import org.springframework.security.web.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
 import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
 import org.springframework.web.servlet.HandlerExceptionResolver;
 
 /**
- * Blueprint "Authentication and Authorization", step 3/4, URL layer.
- * Authentication happens at the ALB; this service verifies the ALB's signed claims and enforces
- * authorization. Two layers: this filter chain is deny-by-default (coarse), and @PreAuthorize on each
- * controller method checks the exact roles (fine-grained).
+ * Blueprint "Authentication and Authorization", steps 3-5, URL layer.
+ * Two ways in, one chain: users via the ALB's signed claims header (step 3), services via an OAuth2 Bearer
+ * token from the IdP (step 5, client credentials). A request carries one or the other.
+ * Two layers: this filter chain is deny-by-default (coarse), and @PreAuthorize on each controller method
+ * checks the exact roles or scopes (fine-grained).
  */
 @Configuration
 @EnableMethodSecurity
@@ -39,6 +43,12 @@ public class SecurityConfig {
         // Keep the authenticated user for this request only, never in an HTTP session.
         albFilter.setSecurityContextRepository(new RequestAttributeSecurityContextRepository());
 
+        // 401/403 go through GlobalExceptionHandler, so they are ProblemDetail like every other error.
+        AuthenticationEntryPoint problemDetailEntryPoint =
+                (request, response, e) -> exceptionResolver.resolveException(request, response, null, e);
+        AccessDeniedHandler problemDetailAccessDenied =
+                (request, response, e) -> exceptionResolver.resolveException(request, response, null, e);
+
         http
                 // Locally there is no cookie and no UI. In AWS the ALB login IS cookie-based, so a real
                 // browser UI needs CSRF protection (known limitation, see README).
@@ -46,12 +56,15 @@ public class SecurityConfig {
                 // Every request carries its own identity (ALB headers / bearer token): no HTTP session.
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .addFilterAt(albFilter, AbstractPreAuthenticatedProcessingFilter.class)
-                // 401/403 go through GlobalExceptionHandler, so they are ProblemDetail like every other error.
+                // Step 5: service tokens (scope claim -> SCOPE_* authorities). Without these two handlers a bad
+                // Bearer token would get Spring's own empty 401, not our ProblemDetail.
+                .oauth2ResourceServer(oauth2 -> oauth2
+                        .jwt(Customizer.withDefaults())
+                        .authenticationEntryPoint(problemDetailEntryPoint)
+                        .accessDeniedHandler(problemDetailAccessDenied))
                 .exceptionHandling(exceptions -> exceptions
-                        .authenticationEntryPoint((request, response, e) ->
-                                exceptionResolver.resolveException(request, response, null, e))
-                        .accessDeniedHandler((request, response, e) ->
-                                exceptionResolver.resolveException(request, response, null, e)))
+                        .authenticationEntryPoint(problemDetailEntryPoint)
+                        .accessDeniedHandler(problemDetailAccessDenied))
                 .authorizeHttpRequests(auth -> auth
                         // Health: load-balancer checks cannot authenticate. Metrics: k6 load tests
                         // (known limitation; a separate internal management port is the real fix).
