@@ -14,6 +14,18 @@ spring:
 
 server:
   port: 8082
+  tomcat:
+    # Needed for tomcat.threads.busy / tomcat.threads.config.max in /actuator/metrics.
+    mbeanregistry:
+      enabled: true
+
+# Same as wire-service: health + metrics only, never "*" (env, beans, heapdump would be public).
+# Actuator shares the API port and Tomcat's threads (known limitation).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
 
 resilience4j:
   circuitbreaker:
@@ -23,6 +35,11 @@ resilience4j:
         sliding-window-size: 10
         minimum-number-of-calls: 5
         failure-rate-threshold: 50
+        # Slow but successful calls also open the breaker (import load test I2: 4 s answers below the 5 s
+        # read timeout never opened it, filled the import executor and turned requests into 500s).
+        # Normal calls take ~5 ms; 2 s = loan-service is in trouble. Starting values.
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 50
         wait-duration-in-open-state: 10s
         permitted-number-of-calls-in-half-open-state: 2
         record-exceptions:
