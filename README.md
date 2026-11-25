@@ -52,7 +52,7 @@ mvn clean install             # build all modules and run tests
 | `kafka` | 9092 | wire-service, notification-service |
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
-| `toxiproxy` | 8474 (API), 13306, 18082 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation)) |
+| `toxiproxy` | 8474 (API), 13306, 18082, 18081 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
@@ -123,6 +123,10 @@ as an empty result instead of a failure. Here:
   least 5 were made, opens when 50% or more failed. While open, calls fail at once without any HTTP
   request. After 10s it lets 2 trial calls through (half-open); if they succeed it closes again,
   otherwise it opens again.
+- **Slow calls count too:** a call that takes longer than 2 s is "slow" even when it succeeds, and
+  50% slow calls open the breaker as well (`slow-call-duration-threshold` / `slow-call-rate-threshold`).
+  Without this, a loan-service that answers in 4 s (below the 5 s read timeout) never opened the
+  breaker and filled the import pool; see [Import under load](#import-under-load-the-loan-service-call).
 - **Only an unhealthy upstream counts as a failure:** timeouts, connection errors and 5xx. A 404 is
   a normal answer (`NOT_FOUND`), so a batch of unknown loan IDs can never open the breaker.
 - **Unavailable is never reported as not found.** Only a 404 means `NOT_FOUND`; an unavailable
@@ -167,7 +171,8 @@ Tests: `LoanServiceClientTest` runs the client against a JDK `HttpServer` (200, 
 500, and a slow answer that times out); `LoanServiceCircuitBreakerTest` gets the client from Spring
 so the breaker proxy is active, and checks that five 500s open it and that the sixth call fails
 without reaching the server, while ten 404s leave it closed; `LoanImportServiceTest` checks the
-outcomes above.
+outcomes above; `LoanServiceClientFallbackTest` checks that the three fallback methods stay
+`public` (why: [a race in Resilience4j](#fallback-race-in-resilience4j)).
 
 ### Calculate a settlement
 
@@ -1154,11 +1159,189 @@ final state `closed`.
 
 - One laptop, injected example latencies, one loan, 60-second runs; the thread and queue numbers are
   for Tomcat's default 200 threads.
-- The other timeouts on the list are not covered yet: the loan-service calls during import
-  (settlement-service) and the S3 and Kafka producer timeouts on the send path. Load-testing send needs
-  many unique `CLOSED` loans, because each loan can be sent only once (see Roadmap).
+- The loan-service calls during import are covered in the next section. The S3 and Kafka producer
+  timeouts on the send path are not covered yet: load-testing send needs many unique `CLOSED` loans,
+  because each loan can be sent only once (see Roadmap).
 - Each `201` creates a `DRAFT`; this round left 1,504 submissions (6,016 recipients), deleted with the
   commands above using `created_time >= '2026-11-24 16:10:00'`.
+
+## Import under load: the loan-service call
+
+The blueprint's debugging scenario: during a busy closing window, loan-service ran out of connections,
+became unresponsive, and imports stopped working. Its fix is a timeout, a circuit breaker and a
+fallback, all built in settlement-service (see
+[Loan-service calls](#loan-service-calls-timeouts-and-circuit-breaker)). This section checks under
+load what those pieces, together with the import thread pool (core 4, max 10, queue 50), really do
+when loan-service is slow. Every number comes from my own runs (2026-11-24, same MacBook).
+
+### Setup
+
+- **Script:** [`load-test/loan-import.js`](load-test/loan-import.js), k6, open model.
+- **Load:** 2 requests/s for 60 s, each importing 6 loans, so **12 loan-service calls per second**
+  arrive at the import pool. 6 loans matches the blueprint's "a couple to a dozen" per dealer.
+- **Loan IDs that loan-service does not know** (`LN-LT-01` … `LN-LT-06`). Each one still makes a real
+  call (loan-service answers 404, outcome `NOT_FOUND`; there is no negative caching), nothing is written
+  to MongoDB, and runs can be repeated without cleanup. A 404 is a successful call for the breaker, so
+  only the injected latency decides what fails.
+- **Toxiproxy** gets a third proxy, `loan-service` (18081 → 8081 on the Mac); settlement-service runs
+  from the jar with `--clients.loan-service.base-url=http://localhost:18081`. A `latency` toxic of 4 s
+  (below the 5 s read timeout) or 6 s (above it) delays every loan-service answer.
+- **settlement-service now has Actuator** (`health`, `metrics`, same rules as wire-service). Without
+  any code, Boot instruments the `loanImportExecutor` bean (`executor.active`, `executor.queued`,
+  `executor.pool.size`, `executor.completed`), Resilience4j registers the breaker metrics, and the
+  Tomcat metrics are on. The loan-service client is built without Boot's builder, so it has no
+  `http.client.requests`; the breaker's `resilience4j.circuitbreaker.calls` timer counts every call
+  that really went out, with its duration.
+- **Mixed results are expected,** so there is no status threshold. The script counts statuses
+  (`status_200`, `status_500`) and per-loan outcomes (`outcome_not_found`, …), splits latency by status,
+  and fails only on an unexpected status, a malformed `200` body, or dropped iterations. The gauges are
+  sampled 250 ms after the import arrivals; sampling at the same instant showed 4 active / 2 queued in
+  every sample of an idle run, which only says when the sampler looked.
+
+```bash
+docker compose up -d toxiproxy
+java -jar settlement-service/target/settlement-service-0.1.0-SNAPSHOT.jar --clients.loan-service.base-url=http://localhost:18081
+k6 run -e RATE=2 -e DURATION=20s load-test/loan-import.js     # warm-up, no toxic, not reported
+curl -s -X POST localhost:8474/proxies/loan-service/toxics -H 'Content-Type: application/json' \
+  -d '{"name":"loan_latency","type":"latency","stream":"downstream","attributes":{"latency":4000,"jitter":0}}'
+k6 run -e RATE=2 -e DURATION=60s load-test/loan-import.js     # measured
+curl -s -X DELETE localhost:8474/proxies/loan-service/toxics/loan_latency
+```
+
+### How the import pool grows
+
+`ThreadPoolExecutor` (behind Spring's `ThreadPoolTaskExecutor`) handles a new task in this order:
+fewer than 4 threads → start one; else room in the queue → queue it; else fewer than 10 threads → start
+one; else **reject** (default `AbortPolicy`). So threads 5-10 start only once **50 tasks are already
+waiting**, and the pool holds at most 60 tasks. A rejection throws `TaskRejectedException` from
+`CompletableFuture.supplyAsync` on the request thread, before any per-loan error handling, so the whole
+request answers `500`, while the tasks it already submitted keep running.
+
+### Results
+
+121 requests per run (726 loans), 0 dropped iterations, every response `200` or `500`.
+
+| Run | Latency | Slow-call rule | `200` | `500` | Outcomes | loan-service calls | Breaker open | `200` median | `200` max |
+|---|---|---|---|---|---|---|---|---|---|
+| I1 | none | — | 121 | 0 | 726 `NOT_FOUND` | 726, mean 3.2 ms | 0% | 15.04 ms | 21.32 ms |
+| I2 | 4 s | no | 10 | **111** | 60 `NOT_FOUND` | 138, all ~4 s, all "successful" | **0%** | 18.29 s | **24.54 s** |
+| I3 | 6 s | no | 111 | 10 | 666 `UNAVAILABLE` | 23 failed (5 s timeout), 659 not permitted | 59% | 6.88 ms | 14.01 s |
+| I4 | 6 s, removed at ~15 s | no | 110 | 10 | 482 `NOT_FOUND`, 178 `UNAVAILABLE` | 14 failed, 482 ok, 172 not permitted | 16% | 17.86 ms | 10.01 s |
+| I2b | 4 s | **yes** | 113 | **7** | 16 `NOT_FOUND`, 662 `UNAVAILABLE` | **20**, all ~4 s; 674 not permitted | 67% | 7.67 ms | **8.02 s** |
+
+Every `500` came back in milliseconds (median 6-8 ms): the rejected request never waits.
+
+**I1, baseline.** All `200`, the pool never grew past 4 threads: a batch of 6 is 4 running + 2 queued,
+never a fifth thread, which is the growth rule above.
+
+**I2, slow but successful: the breaker never opened.** Every call took 4 s and counted as a success
+(Resilience4j's slow-call threshold defaults to 60 s). With 4 threads at 4 s per call the pool finishes
+1 task per second while 12 arrive, so after 10 requests (60 tasks = 10 threads + 50 queued, at about
+4.5 s) every later request was rejected: 111 × `500`. The 10 requests that got in waited up to 24.5 s.
+Worse, **78 of the 138 loan-service calls were orphans**: tasks a request had submitted before its own
+rejection, which then held a thread for 4 s and returned a result nobody read. They kept the queue full,
+which kept rejecting new requests. With real `CLOSED` loans those orphans would **import loans whose
+user got a `500`**. This is the blueprint's own incident shape (an exhausted upstream is slow, not
+down), and the failure-only breaker does not see it.
+
+**I3, slow and failing: the breaker works, after the first wave.** Each call failed at the 5 s read
+timeout. The settlement-service log shows the timeline:
+
+```
+19:56:56  4 calls failed   <- the 4 core threads' first calls
+19:57:00  6 calls failed   <- 5th failure: breaker OPEN at 19:57:00.660, 17 ms after the last 500
+19:57:01  4 calls failed
+19:57:05  3 calls failed   <- started in the ~0.6 s before it opened
+19:57:16  2 calls failed   <- half-open trial calls, then open again
+19:57:31  2 calls failed
+19:57:47  2 calls failed   (23 in total)
+```
+
+Once open, queued tasks finished in milliseconds (`LOAN_SERVICE_UNAVAILABLE`), the queue emptied, and
+nothing more was rejected: fast failures are easy to absorb, slow successes are not.
+
+**I4, recovery.** The toxic was removed at 20:21:32 while the breaker was open; the next half-open trial
+got two fast 404s and closed it, and the rest of the run looked like I1. Only the first wave failed
+(14 calls), and `FAILED` stayed at 0 (see the next part for why that was checked).
+
+### Fallback race in Resilience4j
+
+A first I4 attempt logged one import as `FAILED` ("Import failed unexpectedly") while the breaker was
+simply open, after about 1,350 fallback calls that had worked:
+
+```
+ERROR LoanImportService : Import of loan LN-LT-01 failed unexpectedly
+java.lang.reflect.UndeclaredThrowableException
+    at LoanServiceClient$$SpringCGLIB$$0.getLoan(<generated>)
+Caused by: java.lang.IllegalAccessException: class io.github.resilience4j.spring6.fallback.FallbackMethod
+    cannot access a member of class ...LoanServiceClient with modifiers "private"
+```
+
+The cause is in Resilience4j 2.4.0's `FallbackMethod.invoke`: it caches one `java.lang.reflect.Method`
+per fallback, shared by all threads, and for a non-public method it does
+`accessible = isAccessible()` → `setAccessible(true)` → `invoke` → `finally setAccessible(false)`.
+With 10 import threads in a fallback at once, one thread can reset the flag between another thread's
+check and its `invoke`, and that call fails. It needs many threads in the fallback at the same moment,
+which unit tests and the manual check never produced.
+
+Fix: the three `loanServiceUnavailable` fallbacks are now `public`. A public method needs no
+accessibility change, so there is nothing to race on (package-private would still race). Being public,
+Resilience4j calls them through the Spring proxy; they carry no annotation, so the proxy just forwards.
+`LoanServiceClientFallbackTest` checks that all three stay public, because the race itself is too rare
+to reproduce reliably in a test. The clean I4 run had 0 `FAILED`, but with about 186 fallback calls
+that alone proves little; the library source and the test are the evidence.
+
+### Slow calls open the breaker (beyond the blueprint)
+
+The blueprint's breaker exists to "fail fast when the service is unhealthy" and stop LSC's threads from
+piling up. I2 shows that a breaker counting only failures cannot do that when the upstream is slow
+rather than down. So `loanService` now also treats calls over **2 s** as slow, and opens at **50%** slow
+calls (same window: last 10 calls, at least 5). Normal calls took 3-5 ms, so 2 s means loan-service is
+in trouble; both are starting values.
+
+I2b (I2 again with the rule): the breaker opened at about 8 s (the 5th slow call finished then; the
+first four at 4 s were below the minimum of 5), and each later cycle was 10 s open plus 4 s half-open
+(two slow trials, 100% slow, open again).
+
+| | I2 | I2b |
+|---|---|---|
+| `500` | 111 | 7 |
+| loan-service calls in 60 s | 138 | 20 (-86%) |
+| Orphaned calls | 78 | 4 |
+| Slowest `200` | 24.54 s | 8.02 s |
+
+The second row matters as much as the first: a breaker protects the struggling upstream too, and an
+exhausted connection pool needs fewer calls, not 12 a second.
+
+What it does not fix: the first wave still pays (the breaker learns only from finished calls, so the
+first 7 requests still got a `500`), and a rejection still turns a whole request into a `500` with
+orphaned work behind it (see Roadmap).
+
+### Predictions vs measurements
+
+Written down before each run.
+
+| Run | Predicted | Measured |
+|---|---|---|
+| I1 | all `200`, tens of ms, pool 4, queue ~0 | 15.04 ms median, pool 4; queue "2" in every sample was the sampler's timing, not load |
+| I2 | queue full at ~4.5 s, then mostly fast `500`s (`TaskRejectedException`) | 111 × `500` from ~4.5 s, median 6.16 ms; exception as predicted |
+| I2 | breaker never opens | 0% open, 0 failed calls |
+| I2 | early requests wait up to ~24 s | 24.54 s |
+| I2 | orphaned tasks keep calling loan-service | yes; 78 of 138 calls (not predicted: how many) |
+| I3 | ~10 `500`s, breaker open at ~9.5 s | 10; open at about 9 s |
+| I3 | slowest `200` up to ~10 s | **14.01 s**: 3 more calls started before the 5th failure arrived |
+| I3 | ~20 loan-service calls | 23 |
+| I3 | breaker open 75-80% of samples | **59%**: half-open (5 s per cycle, waiting for the trials) is not "open"; 10/15 of the time after opening ≈ 56% |
+| I4 | closed within ~15 s of removing the toxic; `FAILED` 0 | closed at the first trial after removal; `FAILED` 0 |
+| — | — | **not predicted:** the fallback race (1 in ~1,350) |
+| I2b | open at ~8 s; ~8 `500`s; ~20 calls; slowest `200` ~8.5 s | 7 `500`s; 20 calls; 8.02 s |
+| I2b | open ~60% of samples; ~20 `NOT_FOUND` | 67%; 16 (4 results went to orphans) |
+
+### Caveats
+
+- One laptop, injected example latencies, unknown loan IDs (no MongoDB writes), 60-second runs.
+- 2 requests/s is a test input, not a measured production rate.
+- The breaker settings (including the new 2 s / 50%) and the pool size are still starting values.
 
 ## What works so far
 
@@ -1218,6 +1401,11 @@ final state `closed`.
       5 s timeout fires on time, but at 50 req/s requests queued for threads for up to 20 s; a
       Resilience4j circuit breaker on the call (reactive operator, same 502) cut the median to
       6.97 ms and only 210 of 3,000 requests waited; verified recovery (half-open → closed)
+- [x] Import under load (k6 + Toxiproxy on loan-service, Actuator in settlement-service with executor
+      and breaker metrics): found that slow-but-successful answers never opened the breaker, filled
+      the import pool and turned requests into `500`s; the breaker now also opens on slow calls
+      (111 → 7 `500`s, 138 → 20 calls to the slow upstream); found and fixed a concurrency race in
+      Resilience4j's private-fallback handling
 
 ## Roadmap
 
@@ -1226,8 +1414,12 @@ final state `closed`.
 - [x] Redis cache-aside for the settlement detail
 - [x] Load test wire generation: sequential vs parallel calls, plus JDBC batching
 - [x] Timeouts under load: settlement-service call (plus a circuit breaker on it)
-- [ ] Timeouts under load: loan-service calls during import (settlement-service; read timeout,
-      breaker and the 4-10 thread import pool together)
+- [x] Timeouts under load: loan-service calls during import (plus slow-call detection on the breaker)
+- [ ] Import: a rejected task should not turn the whole request into a `500`; give the affected loans
+      their own outcome and cancel the tasks already queued for that request (a cancelled
+      `CompletableFuture` skips its queued supplier), so no orphaned imports run
+- [ ] Logging: one line per breaker state change instead of one WARN per loan while it is open, and
+      no full stack trace per rejected import
 - [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
 - [ ] Observability: Prometheus, Grafana, OpenTelemetry
@@ -1247,8 +1439,20 @@ final state `closed`.
   recovered, and have to be imported again (all breaker settings are starting values to tune)
 - Each instance has its own circuit breaker state (settlement-service and wire-service alike); with
   several instances, each one has to see the failures itself before it opens
-- settlement-service's circuit breaker state changes are not logged or exposed as metrics yet
-  (it has no Actuator); wire-service's breaker metrics are in Actuator
+- Circuit breaker state changes are not logged in either service; the state is only visible in
+  Actuator metrics (`resilience4j.circuitbreaker.state`)
+- settlement-service's Actuator also runs on the API port and shares its request threads (same as
+  wire-service)
+- When the import pool is full (10 threads + 50 queued), a request gets a `500` for the whole batch,
+  while tasks it had already queued still run and can import loans the user was told failed
+- The import pool grows past 4 threads only after 50 tasks are queued (how `ThreadPoolExecutor` works),
+  so under a slow loan-service most of the "max 10" capacity arrives late
+- The loan-service breaker learns only from finished calls: when loan-service becomes slow or
+  unresponsive, the first wave still waits (4-5 s) and the first few requests can still get `500`s
+- While the loan-service breaker is open, every loan logs one WARN line (about 12 per second at
+  2 imports/s), and every rejected import logs a full stack trace at ERROR
+- The loan-service fallback methods must stay `public` to avoid a race in Resilience4j 2.4.0's
+  handling of non-public fallbacks (a test guards it)
 - The cache holds the whole settlement detail, not only loan metadata as the blueprint says,
   because loan and settlement share one MongoDB document (caching only the loan saves no read)
 - If deleting a cache entry fails (Redis unreachable during a `PATCH`), the old settlement can be
