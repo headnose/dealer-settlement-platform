@@ -317,6 +317,28 @@ class SettlementControllerTest {
         verifyNoInteractions(settlementService);
     }
 
+    // ---------- security: Actuator (O1) ----------
+
+    /**
+     * Prometheus scrapes without a user token, so SecurityConfig must let /actuator/prometheus through.
+     * The web slice has no Actuator endpoints, so the request ends after security (404 or similar): what this
+     * test checks is that security did NOT stop it. Remove the path from permitAll and this test gets a 401.
+     */
+    @Test
+    void prometheusEndpointNeedsNoToken() throws Exception {
+        mockMvc.perform(get("/actuator/prometheus"))
+                .andExpect(status().is(not(anyOf(equalTo(401), equalTo(403)))));
+    }
+
+    /** Deny by default: an Actuator path that is not listed stays closed (env would expose configuration). */
+    @Test
+    void unlistedActuatorEndpointIs401ProblemDetail() throws Exception {
+        mockMvc.perform(get("/actuator/env"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Unauthorized"));
+    }
+
     // ---------- security: services (blueprint step 5, client credentials) ----------
 
     @Test

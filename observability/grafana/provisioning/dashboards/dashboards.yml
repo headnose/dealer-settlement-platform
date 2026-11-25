@@ -1,0 +1,14 @@
+# O1: Grafana loads every *.json dashboard in this folder at startup (and re-reads changes every 10 s).
+# The JSON files in git are the source of truth: UI edits cannot be saved (allowUiUpdates false);
+# export the JSON and replace the file instead.
+apiVersion: 1
+
+providers:
+  - name: dsp
+    folder: DSP
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/provisioning/dashboards

@@ -28,13 +28,19 @@ server:
     mbeanregistry:
       enabled: true
 
-# Same as wire-service: health + metrics only, never "*" (env, beans, heapdump would be public).
+# Same as wire-service: health, metrics, prometheus only, never "*" (env, beans, heapdump would be public).
 # Actuator shares the API port and Tomcat's threads (known limitation).
 management:
   endpoints:
     web:
       exposure:
-        include: health,metrics
+        include: health,metrics,prometheus
+  # O1: publish histogram buckets so Prometheus/Grafana can compute p50/p95/p99 across scrapes
+  # (blueprint "Monitoring": request latency p50/p95/p99). Micrometer's MAX alone cannot do that.
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
 
 resilience4j:
   circuitbreaker:
