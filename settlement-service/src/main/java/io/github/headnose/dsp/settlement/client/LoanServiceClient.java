@@ -29,13 +29,21 @@ public class LoanServiceClient {
 
     private final RestClient restClient;
 
-    public LoanServiceClient(@Value("${clients.loan-service.base-url}") String baseUrl,
+    /**
+     * G1: built from Boot's RestClient.Builder (not the static RestClient.builder()), so every call is
+     * observed: http.client.requests metric, a client span, and the W3C traceparent header for loan-service.
+     * Boot's builder bean is prototype-scoped: each injection gets its own copy, so baseUrl and request
+     * factory set here do not leak into other clients. Our request factory replaces Boot's default on
+     * purpose: it keeps the L1 timeouts exactly as before (read timeout = max gap between bytes).
+     */
+    public LoanServiceClient(RestClient.Builder restClientBuilder,
+                             @Value("${clients.loan-service.base-url}") String baseUrl,
                              @Value("${clients.loan-service.connect-timeout}") Duration connectTimeout,
                              @Value("${clients.loan-service.read-timeout}") Duration readTimeout) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
         requestFactory.setConnectTimeout(connectTimeout);
         requestFactory.setReadTimeout(readTimeout);
-        this.restClient = RestClient.builder()
+        this.restClient = restClientBuilder
                 .baseUrl(baseUrl)
                 .requestFactory(requestFactory)
                 .build();

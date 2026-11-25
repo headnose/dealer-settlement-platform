@@ -75,6 +75,13 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!-- G1: Boot's RestClient.Builder bean (with observations: http.client.requests metric, client span,
+     traceparent header) for the loan-service client. Boot 4: without this starter there is no builder bean. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+
         <!-- O2: distributed tracing. Boot 4's own OpenTelemetry starter: OpenTelemetry SDK + Micrometer
      Tracing bridge + OTLP exporter (traces pushed to Jaeger). Version managed by Boot. -->
         <dependency>
