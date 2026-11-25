@@ -37,7 +37,24 @@ spring:
 
     consumer:
       auto-offset-reset: earliest   # a NEW consumer group starts at the beginning, so no early events are skipped
-
+  # Blueprint step 5: wire-service's own credential for settlement-service (OAuth2 client credentials).
+  # token-uri instead of issuer-uri: issuer-uri makes Boot contact the IdP at startup; token-uri is only
+  # used on the first call, so the app and all tests start without Keycloak.
+  # The secret comes from the environment in AWS (Secrets Manager -> ECS); the default is local dev only.
+  security:
+    oauth2:
+      client:
+        registration:
+          settlement-service:
+            provider: dsp
+            client-id: wire-service
+            client-secret: ${WIRE_SERVICE_CLIENT_SECRET:wire-service-local-secret}
+            client-authentication-method: client_secret_basic
+            authorization-grant-type: client_credentials
+            scope: settlement.read
+        provider:
+          dsp:
+            token-uri: http://localhost:8180/realms/dsp/protocol/openid-connect/token
 server:
   port: 8083
   tomcat:
@@ -70,6 +87,9 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 2
         record-exceptions:
           - io.github.headnose.dsp.wire.client.SettlementServiceUnavailableException
+        # S7: IdP down or token refused is not settlement-service's fault: neither failure nor success.
+        ignore-exceptions:
+          - io.github.headnose.dsp.wire.client.ServiceAuthenticationUnavailableException
 
 # Wire statement attachments (D21-D24). Local = SeaweedFS from docker compose.
 storage:
