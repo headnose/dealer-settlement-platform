@@ -131,6 +131,39 @@ services:
       - "18082:18082"                  # -> settlement-service on the Mac (8082)
       - "18081:18081"                  # -> loan-service on the Mac (8081)
 
+  # O1 (blueprint "Monitoring"): metrics store. Scrapes /actuator/prometheus of the services running on
+  # the Mac every 5 s (job names = service names; targets in observability/prometheus/prometheus.yml).
+  # Profile: not started by a plain `docker compose up -d`; start with
+  # `docker compose --profile observability up -d` (or `docker compose up -d prometheus`).
+  # No volume: `down` empties it (local only). 3.13 = LTS line (fixes until 31 Jul 2027).
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    container_name: dsp-prometheus
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # the Mac, where the services run
+    ports:
+      - "9090:9090"                    # UI + query API: http://localhost:9090
+
+  # O1: dashboards on top of Prometheus (same profile). Data source and dashboards are provisioned from
+  # observability/grafana/provisioning (read-only, in git), so a fresh container needs no clicking.
+  # admin/admin = local dev only (like Keycloak). No volume: UI changes are lost on `down`; edit the files.
+  grafana:
+    image: grafana/grafana:13.3.1
+    container_name: dsp-grafana
+    profiles: ["observability"]
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"                    # UI: http://localhost:3000
+
 volumes:
   mysql-data:
   mongo-data:
