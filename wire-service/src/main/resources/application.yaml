@@ -102,12 +102,19 @@ storage:
   api-call-attempt-timeout: 2s        # one HTTP attempt
   api-call-timeout: 5s                # whole call incl. SDK retries (starting values, check in load test)
 
-# Actuator: health + metrics only (load test: Hikari pool, server and repository timings).
+# Actuator: health, metrics (load tests) and prometheus (O1: scraped by the local Prometheus).
 management:
   endpoints:
     web:
       exposure:
-        include: health,metrics   # never "*": env/configprops/heapdump would expose secrets
+        include: health,metrics,prometheus   # never "*": env/configprops/heapdump would expose secrets
+  # O1: publish histogram buckets so Prometheus/Grafana can compute p50/p95/p99 across scrapes
+  # (blueprint "Monitoring": request latency p50/p95/p99). Micrometer's MAX alone cannot do that.
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        http.client.requests: true   # the settlement-service call (WebClient)
 # Blueprint "Identity Propagation": same ALB (path-based routing) in front of LSC and PWT, so the same
 # signer and key as settlement-service. Locally our dev key pair stands in for the ALB's key (private key in
 # .local-keys/, never committed; a public key is not a secret). In AWS: keys fetched by kid (not built).
