@@ -7,9 +7,12 @@ import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.reactor.circuitbreaker.operator.CircuitBreakerOperator;
 import io.netty.channel.ChannelOption;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.security.oauth2.core.OAuth2AuthorizationException;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
@@ -30,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
  * and calls fail at once instead of holding a Tomcat thread for the full read timeout. The load test
  * showed why: at 50 req/s a 5s timeout needs 250 threads, more than Tomcat's 200, so requests queued for
  * up to 20s.
+ * <p>
+ * Blueprint step 5: every call carries wire-service's own access token (ServiceTokenFilter), never the user's.
  */
 @Component
 public class SettlementServiceClient {
@@ -48,6 +53,7 @@ public class SettlementServiceClient {
     public SettlementServiceClient(
             WebClient.Builder builder,
             CircuitBreakerRegistry circuitBreakerRegistry,
+            @Qualifier("settlementServiceTokenFilter") ExchangeFilterFunction serviceTokenFilter,
             @Value("${clients.settlement-service.base-url}") String baseUrl,
             @Value("${clients.settlement-service.connect-timeout}") Duration connectTimeout,
             @Value("${clients.settlement-service.read-timeout}") Duration readTimeout) {
@@ -58,6 +64,7 @@ public class SettlementServiceClient {
         this.webClient = builder
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .baseUrl(baseUrl)
+                .filter(serviceTokenFilter)
                 .build();
         // Returns the instance configured in YAML (created by Resilience4j's Boot auto-configuration).
         this.circuitBreaker = circuitBreakerRegistry.circuitBreaker(CIRCUIT_BREAKER);
@@ -67,10 +74,13 @@ public class SettlementServiceClient {
      * Starts the call and returns at once. toFuture() subscribes immediately: a Mono alone is lazy and
      * would send nothing. The future fails with:
      *
-     * @throws LoanNotImportedException             settlement-service: 404 "Loan not imported"
-     * @throws SettlementNotCalculatedException     settlement-service: 404 "Settlement not calculated"
-     * @throws SettlementServiceUnavailableException 5xx, timeout, connection refused, empty body, another 404,
-     *                                              or the circuit breaker is open (no call is made)
+     * @throws LoanNotImportedException                  settlement-service: 404 "Loan not imported"
+     * @throws SettlementNotCalculatedException          settlement-service: 404 "Settlement not calculated"
+     * @throws SettlementServiceUnavailableException     5xx, timeout, connection refused, empty body, another 404,
+     *                                                   or the circuit breaker is open (no call is made)
+     * @throws ServiceAuthenticationUnavailableException no access token (IdP down / credentials refused, S7)
+     * @throws IllegalStateException                     settlement-service rejected our token (401/403):
+     *                                                   a configuration error, not an outage (S7)
      */
     public CompletableFuture<SettlementDetailDto> getSettlementDetailAsync(String loanId) {
         return webClient.get()
@@ -79,7 +89,16 @@ public class SettlementServiceClient {
                 .bodyToMono(SettlementDetailDto.class)
                 .switchIfEmpty(Mono.error(() -> new SettlementServiceUnavailableException(
                         "settlement-service returned an empty body for loan " + loanId, null)))
+                // S7: no token -> settlement-service was never called. Ignored by the breaker (YAML).
+                .onErrorMap(OAuth2AuthorizationException.class, e -> new ServiceAuthenticationUnavailableException(
+                        "Could not get wire-service's access token for settlement-service (IdP down or credentials"
+                                + " refused); loan " + loanId, e))
                 .onErrorMap(WebClientResponseException.NotFound.class, e -> translateNotFound(loanId, e))
+                // S7: a token we sent was refused: wrong scope/audience/issuer. Retrying will not help -> 500.
+                .onErrorMap(SettlementServiceClient::isTokenRejected, e -> new IllegalStateException(
+                        "settlement-service rejected wire-service's access token ("
+                                + ((WebClientResponseException) e).getStatusCode()
+                                + "): check the client's scope, audience and issuer configuration", e))
                 .onErrorMap(SettlementServiceClient::isUnavailable, e -> new SettlementServiceUnavailableException(
                         "settlement-service did not answer for loan " + loanId, e))
                 // After the error mapping, so the breaker sees our exception types (B2: only
@@ -98,6 +117,11 @@ public class SettlementServiceClient {
                 || e instanceof IOException
                 || e instanceof io.netty.handler.timeout.TimeoutException
                 || (e instanceof WebClientResponseException response && response.getStatusCode().is5xxServerError());
+    }
+
+    private static boolean isTokenRejected(Throwable e) {
+        return e instanceof WebClientResponseException.Unauthorized
+                || e instanceof WebClientResponseException.Forbidden;
     }
 
     private RuntimeException translateNotFound(String loanId, WebClientResponseException e) {

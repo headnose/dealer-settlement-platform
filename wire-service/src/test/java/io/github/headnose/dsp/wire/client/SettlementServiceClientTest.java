@@ -9,7 +9,12 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.security.oauth2.client.ClientAuthorizationException;
+import org.springframework.security.oauth2.core.OAuth2Error;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
 import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -29,13 +34,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * Real HTTP against a JDK HttpServer on port 0 (same pattern as settlement-service's LoanServiceClientTest).
  * Each test gets a fresh circuit breaker with a tiny window, so the breaker tests need only a few calls;
- * the real settings live in application.yaml.
+ * the real settings live in application.yaml. The token filter is a stand-in with a fixed token (no IdP);
+ * ServiceTokenFilterTest covers the real one.
  */
 class SettlementServiceClientTest {
 
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(1);
     private static final Duration READ_TIMEOUT = Duration.ofMillis(300);
     private static final String LOAN_ID = "LN-1001";
+    private static final String TEST_TOKEN = "test-service-token";
 
     /** A real settlement-service response, copied from the README. */
     private static final String DETAIL_JSON = """
@@ -60,9 +67,12 @@ class SettlementServiceClientTest {
             """;
 
     private final AtomicReference<String> requestedPath = new AtomicReference<>();
+    private final AtomicReference<String> requestedAuthorization = new AtomicReference<>();
     private final AtomicInteger requestCount = new AtomicInteger();
 
     private HttpServer server;
+    private String baseUrl;
+    private CircuitBreakerRegistry registry;
     private CircuitBreaker circuitBreaker;
     private SettlementServiceClient client;
 
@@ -70,8 +80,9 @@ class SettlementServiceClientTest {
     void startFakeSettlementService() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0); // port 0 = any free port
         server.start();
-        String baseUrl = "http://localhost:" + server.getAddress().getPort();
+        baseUrl = "http://localhost:" + server.getAddress().getPort();
         // Opens after 2 calls if at least half failed; stays open for the rest of the test.
+        // Same record/ignore lists as the YAML instance.
         CircuitBreakerConfig config = CircuitBreakerConfig.custom()
                 .slidingWindowType(CircuitBreakerConfig.SlidingWindowType.COUNT_BASED)
                 .slidingWindowSize(2)
@@ -79,9 +90,10 @@ class SettlementServiceClientTest {
                 .failureRateThreshold(50)
                 .waitDurationInOpenState(Duration.ofMinutes(1))
                 .recordExceptions(SettlementServiceUnavailableException.class)
+                .ignoreExceptions(ServiceAuthenticationUnavailableException.class)
                 .build();
-        CircuitBreakerRegistry registry = CircuitBreakerRegistry.of(config);
-        client = new SettlementServiceClient(WebClient.builder(), registry, baseUrl, CONNECT_TIMEOUT, READ_TIMEOUT);
+        registry = CircuitBreakerRegistry.of(config);
+        client = newClient(bearer(TEST_TOKEN));
         circuitBreaker = registry.circuitBreaker(SettlementServiceClient.CIRCUIT_BREAKER);
     }
 
@@ -91,12 +103,13 @@ class SettlementServiceClientTest {
     }
 
     @Test
-    void returnsSettlementDetailOn200() {
+    void returnsSettlementDetailOn200WithTheServiceToken() {
         stub(200, "application/json", DETAIL_JSON, Duration.ZERO);
 
         SettlementDetailDto detail = client.getSettlementDetailAsync(LOAN_ID).join();
 
         assertThat(requestedPath.get()).isEqualTo("/api/v1/loans/LN-1001/settlements");
+        assertThat(requestedAuthorization.get()).isEqualTo("Bearer " + TEST_TOKEN);
         assertThat(detail.loan().dealer().dealerContactEmail()).isEqualTo("accounts@riverbend-motors.example.com");
         assertThat(detail.loan().dealer().dealerBankContactEmail()).isEqualTo("wires@riverbend-bank.example.com");
         assertThat(detail.settlement().netSettlement()).isEqualTo(new BigDecimal("27850.00")); // scale kept
@@ -188,6 +201,46 @@ class SettlementServiceClientTest {
         assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
     }
 
+    // ---------- S7: service authentication ----------
+
+    @Test
+    void noAccessTokenNeverCallsSettlementServiceAndIsIgnoredByTheBreaker() {
+        stub(200, "application/json", DETAIL_JSON, Duration.ZERO);
+        SettlementServiceClient withoutToken = newClient((request, next) -> Mono.error(
+                new ClientAuthorizationException(new OAuth2Error("unauthorized_client"), "settlement-service")));
+
+        assertThatThrownBy(() -> withoutToken.getSettlementDetailAsync(LOAN_ID).join())
+                .isInstanceOf(CompletionException.class)
+                .hasCauseInstanceOf(ServiceAuthenticationUnavailableException.class);
+
+        assertThat(requestCount.get()).isZero();
+        // The IdP is down, not settlement-service: neither a failure nor a success for its breaker.
+        assertThat(circuitBreaker.getMetrics().getNumberOfBufferedCalls()).isZero();
+    }
+
+    @Test
+    void settlementServiceRejectingTheTokenIsAConfigurationErrorNotAnOutage() {
+        stub(401, "application/problem+json", """
+                {"title": "Unauthorized", "status": 401}
+                """, Duration.ZERO);
+
+        assertFailsWith(IllegalStateException.class);
+        assertThat(circuitBreaker.getMetrics().getNumberOfFailedCalls()).isZero();
+    }
+
+    // ---------- helpers ----------
+
+    private SettlementServiceClient newClient(ExchangeFilterFunction tokenFilter) {
+        return new SettlementServiceClient(WebClient.builder(), registry, tokenFilter, baseUrl,
+                CONNECT_TIMEOUT, READ_TIMEOUT);
+    }
+
+    /** Stands in for ServiceTokenFilter: a fixed token, no IdP. */
+    private static ExchangeFilterFunction bearer(String token) {
+        return (request, next) -> next.exchange(
+                ClientRequest.from(request).headers(headers -> headers.setBearerAuth(token)).build());
+    }
+
     /** join() wraps the failure: the real exception is the cause. */
     private void assertFailsWith(Class<? extends Throwable> type) {
         assertThatThrownBy(() -> client.getSettlementDetailAsync(LOAN_ID).join())
@@ -207,6 +260,7 @@ class SettlementServiceClientTest {
         server.createContext("/api/v1/loans/", exchange -> {
             requestCount.incrementAndGet();
             requestedPath.set(exchange.getRequestURI().getPath());
+            requestedAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
             try {
                 Thread.sleep(delay.toMillis());
             } catch (InterruptedException e) {

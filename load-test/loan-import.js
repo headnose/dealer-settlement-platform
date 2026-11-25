@@ -8,9 +8,9 @@
 // settlement-service from the packaged jar, calling loan-service THROUGH Toxiproxy (18081 -> 8081):
 //   java -jar settlement-service/target/settlement-service-0.1.0-SNAPSHOT.jar --clients.loan-service.base-url=http://localhost:18081
 // Warm-up (no toxic), not reported:
-//   k6 run -e RATE=2 -e DURATION=20s load-test/loan-import.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=2 -e DURATION=20s load-test/loan-import.js
 // Measured run:
-//   k6 run -e RATE=2 -e DURATION=60s load-test/loan-import.js
+//   k6 run -e TOKEN="$FINOPS" -e RATE=2 -e DURATION=60s load-test/loan-import.js
 // Toxic = latency on loan-service's responses (no jitter):
 //   curl -s -X POST localhost:8474/proxies/loan-service/toxics -H 'Content-Type: application/json' -d '{"name":"loan_latency","type":"latency","stream":"downstream","attributes":{"latency":4000,"jitter":0}}'
 // Remove it:
@@ -33,6 +33,14 @@ const LOAN_PREFIX = __ENV.LOAN_PREFIX || 'LN-LT-';
 // iterations and the real rate is lower than asked.
 const PRE_VUS = parseInt(__ENV.PRE_VUS || '60', 10);
 const MAX_VUS = parseInt(__ENV.MAX_VUS || '300', 10);
+// User token (x-amzn-oidc-data, the header the ALB sends) with role FinanceOps; the API answers 401
+// without it. Mint it from the project root (local dev key, valid 60 min by default):
+//   FINOPS=$(java dev-tools/AlbDevToken.java dev-finops FinanceOps 60)
+// Actuator health and metrics need no token. A run that outlives the token gets 401s and fails its checks.
+const TOKEN = __ENV.TOKEN;
+if (!TOKEN) {
+    throw new Error('TOKEN is not set: run with -e TOKEN="$FINOPS" (see the comment above)');
+}
 
 const LOAN_IDS = Array.from({ length: LOAN_COUNT }, (_, i) => `${LOAN_PREFIX}${String(i + 1).padStart(2, '0')}`);
 
@@ -156,7 +164,7 @@ export function setup() {
 
 const payload = JSON.stringify({ loanIds: LOAN_IDS });
 const params = {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-amzn-oidc-data': TOKEN },
     tags: { name: 'POST /api/v1/imports' },
     // http_req_failed = share of non-200 responses; should be 0 since B2 (the check enforces it).
     responseCallback: http.expectedStatuses(200),

@@ -69,6 +69,27 @@
             <artifactId>spring-boot-starter-micrometer-metrics</artifactId>
         </dependency>
 
+        <!-- Blueprint "Authentication and Authorization": ALB headers -> PreAuthenticatedAuthenticationToken,
+     URL rules + @PreAuthorize. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+
+        <!-- ES256 verification of the ALB's x-amzn-oidc-data JWT. Brings Nimbus JOSE+JWT in the version
+      Spring Security is tested with (Boot manages spring-security-*, not Nimbus itself). -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-oauth2-jose</artifactId>
+        </dependency>
+
+        <!-- Blueprint step 5: service-to-service calls carry an OAuth2 access token (client credentials).
+     Verified here as a resource server: signature via the IdP's JWKS, issuer, expiry, audience. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-mongodb-test</artifactId>
@@ -82,6 +103,12 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-test</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
