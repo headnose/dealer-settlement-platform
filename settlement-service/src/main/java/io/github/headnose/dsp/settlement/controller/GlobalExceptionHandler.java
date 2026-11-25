@@ -11,6 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -77,6 +79,27 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         problem.setTitle("Validation failed");
         problem.setProperty("errors", violations);
         return handleExceptionInternal(ex, problem, headers, status, request);
+    }
+
+    /** No identity, or the ALB claims failed verification (reason is logged by AlbUserDetailsService). */
+    @ExceptionHandler(AuthenticationException.class)
+    public ProblemDetail handleUnauthenticated(AuthenticationException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED,
+                "Authentication required.");
+        problem.setTitle("Unauthorized");
+        return problem;
+    }
+
+    /**
+     * Authenticated but not allowed: URL rules AND @PreAuthorize (AuthorizationDeniedException is a subclass).
+     * Without this, a @PreAuthorize denial would fall into the catch-all below and become a 500.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ProblemDetail handleAccessDenied(AccessDeniedException ex) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN,
+                "You do not have permission for this operation.");
+        problem.setTitle("Forbidden");
+        return problem;
     }
 
     /** Last resort: log everything, tell the client nothing internal. */

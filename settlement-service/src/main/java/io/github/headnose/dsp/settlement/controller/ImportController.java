@@ -4,6 +4,7 @@ import io.github.headnose.dsp.settlement.controller.dto.ImportRequest;
 import io.github.headnose.dsp.settlement.service.ImportResult;
 import io.github.headnose.dsp.settlement.service.LoanImportService;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,7 +22,9 @@ public class ImportController {
         this.loanImportService = loanImportService;
     }
 
+    /** Workflow 1: Finance Operations imports closed loans. */
     @PostMapping
+    @PreAuthorize("hasRole('FinanceOps')")
     public List<ImportResult> importLoans(@Valid @RequestBody ImportRequest request) {
         return loanImportService.importLoans(request.loanIds());
     }

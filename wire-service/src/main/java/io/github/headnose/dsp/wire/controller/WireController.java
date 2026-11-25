@@ -8,6 +8,7 @@ import io.github.headnose.dsp.wire.service.WireGenerationService;
 import io.github.headnose.dsp.wire.service.WireSendService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -27,9 +28,13 @@ public class WireController {
         this.wireSendService = wireSendService;
     }
 
-    /** Generate Wire Statement (blueprint: POST /api/v1/wires). Creates a DRAFT submission. */
+    /**
+     * Generate Wire Statement (blueprint: POST /api/v1/wires). Creates a DRAFT submission.
+     * Maker side of maker-checker: Finance Operations prepares the wire.
+     */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasRole('FinanceOps')")
     public WireSubmissionDto generate(@Valid @RequestBody WireGenerationRequestDto request) {
         WireSubmission submission = wireGenerationService.generate(request);
         return WireSubmissionDto.from(submission);
@@ -38,9 +43,11 @@ public class WireController {
     /**
      * Send Wire Statement (blueprint: POST /api/v1/wires/{submissionId}/send).
      * 202 Accepted (D11): the request is accepted and the emails go out asynchronously.
+     * Checker side of maker-checker: only a SettlementAdmin releases the wire to the dealer's bank.
      */
     @PostMapping("/{submissionId}/send")
     @ResponseStatus(HttpStatus.ACCEPTED)
+    @PreAuthorize("hasRole('SettlementAdmin')")
     public SubmissionStatusDto send(@PathVariable String submissionId) {
         return wireSendService.send(submissionId);
     }

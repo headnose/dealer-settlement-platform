@@ -1,6 +1,7 @@
 package io.github.headnose.dsp.wire.controller;
 
 import io.github.headnose.dsp.wire.client.LoanNotImportedException;
+import io.github.headnose.dsp.wire.client.ServiceAuthenticationUnavailableException;
 import io.github.headnose.dsp.wire.client.SettlementNotCalculatedException;
 import io.github.headnose.dsp.wire.client.SettlementServiceUnavailableException;
 import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
@@ -15,6 +16,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -25,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13, D23). */
+/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13, D23, S7). */
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
@@ -106,6 +109,18 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         return problem;
     }
 
+    // ---------- 503: wire-service could not get its own access token (S7) ----------
+
+    /** IdP down or credentials refused: our infrastructure, settlement-service was never called. */
+    @ExceptionHandler(ServiceAuthenticationUnavailableException.class)
+    public ProblemDetail handleServiceAuthenticationUnavailable(ServiceAuthenticationUnavailableException e) {
+        log.warn("service authentication failed: {}", e.getMessage(), e);
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "Could not authenticate to settlement-service. No wire was created; try again later.");
+        problem.setTitle("Service authentication unavailable");
+        return problem;
+    }
+
     // ---------- 400: invalid request fields ----------
 
     @Override
@@ -122,6 +137,29 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
                 .toList();
         problem.setProperty("errors", errors);
         return handleExceptionInternal(ex, problem, headers, status, request);
+    }
+
+    // ---------- 401 / 403: security (routed here by SecurityConfig) ----------
+
+    /** No identity, or the ALB claims failed verification (reason is logged by AlbUserDetailsService). */
+    @ExceptionHandler(AuthenticationException.class)
+    public ProblemDetail handleUnauthenticated(AuthenticationException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED,
+                "Authentication required.");
+        problem.setTitle("Unauthorized");
+        return problem;
+    }
+
+    /**
+     * Authenticated but not allowed: URL rules AND @PreAuthorize (AuthorizationDeniedException is a subclass).
+     * Without this, a @PreAuthorize denial would fall into the catch-all below and become a 500.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ProblemDetail handleAccessDenied(AccessDeniedException e) {
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.FORBIDDEN,
+                "You do not have permission for this operation.");
+        problem.setTitle("Forbidden");
+        return problem;
     }
 
     // ---------- 500: anything else (logged, never returned) ----------
