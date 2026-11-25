@@ -29,14 +29,17 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.time.LocalDateTime;
 
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -300,6 +303,28 @@ class WireControllerTest {
                 .andExpect(jsonPath("$.title").value("Unauthorized"));
 
         verifyNoInteractions(wireGenerationService);
+    }
+
+    // ---------- security: Actuator (O1) ----------
+
+    /**
+     * Prometheus scrapes without a user token, so SecurityConfig must let /actuator/prometheus through.
+     * The web slice has no Actuator endpoints, so the request ends after security (404 or similar): what this
+     * test checks is that security did NOT stop it. Remove the path from permitAll and this test gets a 401.
+     */
+    @Test
+    void prometheusEndpointNeedsNoToken() throws Exception {
+        mockMvc.perform(get("/actuator/prometheus"))
+                .andExpect(status().is(not(anyOf(equalTo(401), equalTo(403)))));
+    }
+
+    /** Deny by default: an Actuator path that is not listed stays closed (env would expose configuration). */
+    @Test
+    void unlistedActuatorEndpointIs401ProblemDetail() throws Exception {
+        mockMvc.perform(get("/actuator/env"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Unauthorized"));
     }
 
     /** Maker-checker: the person who prepares a wire cannot release it to the dealer's bank. */
