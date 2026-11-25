@@ -1,0 +1,14 @@
+# O1: Grafana reads this at startup. Grafana runs in the same compose network as Prometheus, so it
+# uses the service name (prometheus:9090), not localhost. uid is fixed so dashboards can refer to it.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy                # Grafana's backend queries Prometheus (the browser never does)
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false              # the file is the source of truth
+    jsonData:
+      timeInterval: 5s           # = scrape_interval, so $__rate_interval always spans enough scrapes
