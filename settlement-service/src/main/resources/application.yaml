@@ -30,6 +30,8 @@ server:
 
 # Same as wire-service: health, metrics, prometheus only, never "*" (env, beans, heapdump would be public).
 # Actuator shares the API port and Tomcat's threads (known limitation).
+# Same as wire-service: health, metrics, prometheus only, never "*" (env, beans, heapdump would be public).
+# Actuator shares the API port and Tomcat's threads (known limitation).
 management:
   endpoints:
     web:
@@ -41,6 +43,22 @@ management:
     distribution:
       percentiles-histogram:
         http.server.requests: true
+  # O2 (G4): trace every request locally (Boot default 0.1). Production would sample less.
+  tracing:
+    sampling:
+      probability: 1.0
+  # O2: export spans over OTLP/HTTP to the local Jaeger (no default endpoint in Boot 4.1).
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+  # O2: the OpenTelemetry starter also brings Micrometer's OTLP metrics registry (enabled by default,
+  # pushes to localhost:4318 = Jaeger). Metrics are already pulled by Prometheus: turn the push off.
+  otlp:
+    metrics:
+      export:
+        enabled: false
 
 resilience4j:
   circuitbreaker:
