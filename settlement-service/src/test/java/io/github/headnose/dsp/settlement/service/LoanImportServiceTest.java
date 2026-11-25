@@ -14,11 +14,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.core.task.TaskRejectedException;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -98,5 +101,36 @@ class LoanImportServiceTest {
 
         assertThat(results).containsExactly(new ImportResult("LN-1",
                 ImportOutcome.FAILED, LoanImportService.FAILED_MESSAGE));
+    }
+
+    @Test
+    void loansWithNoFreeSlotAreCapacityExceededAndNothingRunsForThem() {
+        service = new LoanImportService(loanServiceClient, repository, cache, acceptingOnly(1));
+        when(repository.existsById("LN-1")).thenReturn(false);
+        when(loanServiceClient.getLoan("LN-1")).thenReturn(Optional.empty());
+
+        List<ImportResult> results = service.importLoans(List.of("LN-1", "LN-2", "LN-3"));
+
+        // 200 with one result per loan in input order (was: the whole request failed with 500)
+        assertThat(results).containsExactly(
+                new ImportResult("LN-1", ImportOutcome.NOT_FOUND, "Loan not found in loan-service"),
+                new ImportResult("LN-2", ImportOutcome.IMPORT_CAPACITY_EXCEEDED, LoanImportService.CAPACITY_MESSAGE),
+                new ImportResult("LN-3", ImportOutcome.IMPORT_CAPACITY_EXCEEDED, LoanImportService.CAPACITY_MESSAGE));
+        // "not started" must be true: no Mongo check, no loan-service call for the rejected loans
+        verify(repository, never()).existsById("LN-2");
+        verify(repository, never()).existsById("LN-3");
+        verify(loanServiceClient, never()).getLoan("LN-2");
+        verify(loanServiceClient, never()).getLoan("LN-3");
+    }
+
+    /** Runs the first {@code capacity} tasks on the calling thread, then rejects like a full pool. */
+    private static Executor acceptingOnly(int capacity) {
+        AtomicInteger accepted = new AtomicInteger();
+        return task -> {
+            if (accepted.incrementAndGet() > capacity) {
+                throw new TaskRejectedException("pool full (test)");
+            }
+            task.run();
+        };
     }
 }

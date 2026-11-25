@@ -16,8 +16,10 @@
 // Remove it:
 //   curl -s -X DELETE localhost:8474/proxies/loan-service/toxics/loan_latency
 //
-// Mixed results are EXPECTED under a toxic: 200 with per-loan outcomes, or 500 when the import executor
-// rejects a task (queue full). So there is no status threshold; the summary COUNTS statuses and outcomes.
+// Since the rejection fix (B2), a full import pool no longer fails the request: the loans that found no
+// free slot get IMPORT_CAPACITY_EXCEEDED inside a normal 200. So every response must be 200; a 500 now
+// means a bug. (Runs I1-I4 and I2b were made BEFORE the fix, when a rejection returned 500.)
+// Mixed per-loan outcomes are still expected under a toxic: the summary COUNTS them.
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
@@ -60,7 +62,7 @@ export const options = {
         },
     },
     thresholds: {
-        // Only 200 and 500 are expected; anything else (or a malformed 200 body) fails the run.
+        // Only 200 is expected; anything else (or a malformed 200 body) fails the run.
         'checks{scenario:imports}': ['rate==1'],
         // k6 ran out of VUs = the requested rate was not really delivered.
         dropped_iterations: ['count==0'],
@@ -75,12 +77,16 @@ export const options = {
 // Status and per-loan outcome counters (only the ones that occur show up in the summary).
 const statusCounters = { 200: new Counter('status_200'), 500: new Counter('status_500') };
 const statusOther = new Counter('status_other');
-const OUTCOMES = ['IMPORTED', 'ALREADY_IMPORTED', 'NOT_FOUND', 'NOT_CLOSED', 'LOAN_SERVICE_UNAVAILABLE', 'FAILED'];
+const OUTCOMES = ['IMPORTED', 'ALREADY_IMPORTED', 'NOT_FOUND', 'NOT_CLOSED', 'LOAN_SERVICE_UNAVAILABLE',
+    'IMPORT_CAPACITY_EXCEEDED', 'FAILED'];
 const outcomeCounters = {};
 for (const outcome of OUTCOMES) {
     outcomeCounters[outcome] = new Counter(`outcome_${outcome.toLowerCase()}`);
 }
 const outcomeOther = new Counter('outcome_other');
+// Requests (not loans) by how much of the batch the pool accepted: some loans rejected, or all of them.
+const requestsPartlyRejected = new Counter('requests_partly_rejected');
+const requestsFullyRejected = new Counter('requests_fully_rejected');
 
 // Gauges sampled once per second: [k6 metric name, actuator metric, tags]. The summary's max is the peak
 // seen during the run. The breaker gauge is 1 while loanService is OPEN, else 0 (avg = share of samples open).
@@ -152,7 +158,7 @@ const payload = JSON.stringify({ loanIds: LOAN_IDS });
 const params = {
     headers: { 'Content-Type': 'application/json' },
     tags: { name: 'POST /api/v1/imports' },
-    // http_req_failed = share of non-200 responses (the 500s); no threshold on it, it is a result.
+    // http_req_failed = share of non-200 responses; should be 0 since B2 (the check enforces it).
     responseCallback: http.expectedStatuses(200),
 };
 
@@ -168,14 +174,23 @@ export function importBatch() {
             results = null;
         }
         if (Array.isArray(results)) {
+            let rejected = 0;
             for (const r of results) {
                 (outcomeCounters[r.outcome] || outcomeOther).add(1);
+                if (r.outcome === 'IMPORT_CAPACITY_EXCEEDED') {
+                    rejected++;
+                }
+            }
+            if (rejected === results.length) {
+                requestsFullyRejected.add(1);
+            } else if (rejected > 0) {
+                requestsPartlyRejected.add(1);
             }
         }
     }
 
     check(res, {
-        'status is 200 or 500': (r) => r.status === 200 || r.status === 500,
+        'status is 200': (r) => r.status === 200,
         // ImportController returns one result per loan, in input order.
         'a 200 has one result per loan, in order': (r) => r.status !== 200
             || (Array.isArray(results) && results.length === LOAN_COUNT
@@ -216,6 +231,7 @@ export function teardown(before) {
         }
         console.log(line);
     }
-    // Tasks of a request that got a 500 stay queued and still run afterwards.
-    console.log('  (orphaned tasks of rejected requests may still be running: executor/breaker counts can lag)');
+    // Since B2 a request waits for every task it started, so nothing should still be running now.
+    // Check executor.queued / executor.active right after the run: both 0 = no orphaned imports.
+    console.log('  (since B2: executor.queued and executor.active should be 0 now = no orphaned imports)');
 }
