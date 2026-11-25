@@ -29,6 +29,13 @@ spring:
 server:
   port: 8084
 
+# O1: health + prometheus only (no security in BlastMail: it has no user-facing API). Never "*".
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+
 topics:
   partitions: 6
   replication-factor: 1                  # 1 locally, blueprint >= 3

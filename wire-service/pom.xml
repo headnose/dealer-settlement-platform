@@ -59,6 +59,12 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-micrometer-metrics</artifactId>
 		</dependency>
+		<!-- O1: /actuator/prometheus (metrics in Prometheus text format, scraped by the local Prometheus).
+		     Version managed by Boot. -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+		</dependency>
 		<!-- Blueprint "Authentication and Authorization": own Spring Security setup (not shared with LSC). -->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>

@@ -53,9 +53,11 @@ public class SecurityConfig {
                         .accessDeniedHandler((request, response, e) ->
                                 exceptionResolver.resolveException(request, response, null, e)))
                 .authorizeHttpRequests(auth -> auth
-                        // Health: load-balancer checks cannot authenticate. Metrics: k6 load tests
-                        // (known limitation; a separate internal management port is the real fix).
-                        .requestMatchers("/actuator/health", "/actuator/metrics", "/actuator/metrics/**").permitAll()
+                        // Health: load-balancer checks cannot authenticate. Metrics: k6 load tests.
+                        // Prometheus: the scraper sends no user token (O1). Known limitation: open without
+                        // a token; a separate internal management port is the real fix.
+                        .requestMatchers("/actuator/health", "/actuator/metrics", "/actuator/metrics/**",
+                                "/actuator/prometheus").permitAll()
                         // Boot's error page must not turn a real error into a 401/403.
                         .requestMatchers("/error").permitAll()
                         .requestMatchers("/api/v1/**").authenticated()

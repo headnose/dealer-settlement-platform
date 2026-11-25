@@ -52,6 +52,21 @@
         </dependency>
 
 
+        <!-- O1: Actuator (health) + Micrometer + /actuator/prometheus, mainly for Kafka consumer lag
+             (blueprint "Monitoring"). Boot 4: actuator alone has no metrics; micrometer-metrics adds them. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-micrometer-metrics</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.micrometer</groupId>
+            <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
         <!-- @Validated on StorageProperties: fail at startup if storage settings are missing -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
