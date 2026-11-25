@@ -41,6 +41,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import io.github.headnose.dsp.wire.client.ServiceAuthenticationUnavailableException;
 
 @WebMvcTest(WireController.class)
 @Import(AlbTestSecurityConfig.class)
@@ -186,7 +187,23 @@ class WireControllerTest {
                 .andExpect(content().string(not(containsString("internal-host"))));
     }
 
-    // ---------- 500 ----------
+    // ---------- 503: no service token (S7) ----------
+
+    @Test
+    void returns503WithoutLeakingIdpInternalsWhenTheServiceTokenIsUnavailable() throws Exception {
+        when(wireGenerationService.generate(any(WireGenerationRequestDto.class)))
+                .thenThrow(new ServiceAuthenticationUnavailableException(
+                        "Could not get wire-service's access token for settlement-service; loan LN-1001",
+                        new RuntimeException("I/O error on POST request for "
+                                + "http://localhost:8180/realms/dsp/protocol/openid-connect/token")));
+
+        postWire(VALID_BODY)
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Service authentication unavailable"))
+                .andExpect(content().string(not(containsString("8180"))))
+                .andExpect(content().string(not(containsString("realms"))));
+    }
 
     @Test
     void returns500WithoutLeakingInternals() throws Exception {

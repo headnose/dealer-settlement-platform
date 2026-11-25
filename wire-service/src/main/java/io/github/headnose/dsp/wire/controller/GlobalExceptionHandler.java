@@ -1,6 +1,7 @@
 package io.github.headnose.dsp.wire.controller;
 
 import io.github.headnose.dsp.wire.client.LoanNotImportedException;
+import io.github.headnose.dsp.wire.client.ServiceAuthenticationUnavailableException;
 import io.github.headnose.dsp.wire.client.SettlementNotCalculatedException;
 import io.github.headnose.dsp.wire.client.SettlementServiceUnavailableException;
 import io.github.headnose.dsp.wire.messaging.EmailDeliveryPublishException;
@@ -27,7 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13, D23). */
+/** Turns exceptions into RFC 9457 Problem Details (decisions D3, D11, D13, D23, S7). */
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
@@ -105,6 +106,18 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
                 "Could not store the wire statement. It is still a DRAFT; try again later.");
         problem.setTitle("Wire statement storage unavailable");
+        return problem;
+    }
+
+    // ---------- 503: wire-service could not get its own access token (S7) ----------
+
+    /** IdP down or credentials refused: our infrastructure, settlement-service was never called. */
+    @ExceptionHandler(ServiceAuthenticationUnavailableException.class)
+    public ProblemDetail handleServiceAuthenticationUnavailable(ServiceAuthenticationUnavailableException e) {
+        log.warn("service authentication failed: {}", e.getMessage(), e);
+        ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE,
+                "Could not authenticate to settlement-service. No wire was created; try again later.");
+        problem.setTitle("Service authentication unavailable");
         return problem;
     }
 
