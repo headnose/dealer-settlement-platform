@@ -47,6 +47,7 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+
 		<!-- Actuator: /actuator/health and /actuator/metrics (Hikari pool, server and repository
              timings for the load test). Exposure limited to health,metrics in application.yaml. -->
 		<dependency>
@@ -136,6 +137,14 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- O2: Boot 4 keeps the test default "no span export in @SpringBootTest" in this test starter.
+		     Without it, test contexts tried to send spans to localhost:4318 (seen in the build log). -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-opentelemetry-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 

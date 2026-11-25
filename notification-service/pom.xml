@@ -33,6 +33,14 @@
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
 
+        <!-- O2: Boot 4 keeps the test default "no span export in @SpringBootTest" in this test starter.
+     Without it, test contexts tried to send spans to localhost:4318 (seen in the build log). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Consume email-delivery, publish delivery-status (also brings Boot's JsonMapper via Jackson 3) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
