@@ -56,3 +56,17 @@ clients:
 # 30m = low end of the blueprint's 30-60 min: stale settlement data is a compliance risk.
 settlement-cache:
   ttl: 30m
+
+# Blueprint "Identity Propagation": the ALB signs the user's claims (ES256) into x-amzn-oidc-data.
+# Locally our own dev key pair stands in for the ALB's key (private key in .local-keys/, never committed;
+# a public key is not a secret). In AWS: signer = the real ALB ARN, keys fetched by kid from the
+# regional ALB public-key endpoint (not built, known limitation).
+security:
+  alb:
+    claims-header: x-amzn-oidc-data
+    signer: arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/dsp-local/0000000000000000
+    key-id: local-dev-1
+    groups-claim: groups
+    clock-skew: 60s
+    public-key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEGt+XW//2wIar/EJzPL3n+m8XDCS+
+      JyrT/HeANE7wPJBEnoa3OhaFSqtzAGwHq23hkUHfBhI2jJ5Wx6w1VfQV3g==

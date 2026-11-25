@@ -4,20 +4,26 @@ import io.github.headnose.dsp.settlement.cache.CachedSettlementDetail;
 import io.github.headnose.dsp.settlement.controller.dto.SettlementRequestDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
 import io.github.headnose.dsp.settlement.model.AdjustmentType;
+import io.github.headnose.dsp.settlement.security.AlbTestSecurityConfig;
+import io.github.headnose.dsp.settlement.security.AlbTestTokens;
 import io.github.headnose.dsp.settlement.service.LoanNotImportedException;
+import io.github.headnose.dsp.settlement.service.SettlementNotCalculatedException;
 import io.github.headnose.dsp.settlement.service.SettlementRuleViolationException;
 import io.github.headnose.dsp.settlement.service.SettlementService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
+
 import java.math.BigDecimal;
 import java.util.List;
+
 import static io.github.headnose.dsp.settlement.SettlementTestData.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -26,14 +32,14 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
-import io.github.headnose.dsp.settlement.service.SettlementNotCalculatedException;
-import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 @WebMvcTest(SettlementController.class)
+@Import(AlbTestSecurityConfig.class)
 class SettlementControllerTest {
 
     private static final String URL = "/api/v1/loans/{loanId}/settlements";
@@ -55,13 +61,22 @@ class SettlementControllerTest {
     private SettlementService settlementService;
 
     private ResultActions patchSettlement(String body) throws Exception {
+        return patchSettlementAs(AlbTestTokens.forGroups("FinanceOps"), body);
+    }
+
+    private ResultActions patchSettlementAs(String token, String body) throws Exception {
         return mockMvc.perform(patch(URL, LOAN_ID)
+                .header(AlbTestTokens.HEADER, token)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body));
     }
 
     private ResultActions getSettlement() throws Exception {
-        return mockMvc.perform(get(URL, LOAN_ID));
+        return getSettlementAs(AlbTestTokens.forGroups("FinanceOps"));
+    }
+
+    private ResultActions getSettlementAs(String token) throws Exception {
+        return mockMvc.perform(get(URL, LOAN_ID).header(AlbTestTokens.HEADER, token));
     }
 
     private static LoanSettlementDocument calculatedDocument() {
@@ -239,5 +254,55 @@ class SettlementControllerTest {
                 .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
                 .andExpect(jsonPath("$.title").value("Settlement not calculated"))
                 .andExpect(jsonPath("$.loanId").value(LOAN_ID));
+    }
+
+    // ---------- security ----------
+
+    @Test
+    void getWithoutTokenIs401ProblemDetail() throws Exception {
+        mockMvc.perform(get(URL, LOAN_ID))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Unauthorized"));
+
+        verifyNoInteractions(settlementService);
+    }
+
+    @Test
+    void tamperedTokenIs401() throws Exception {
+        String financeOps = AlbTestTokens.forGroups("FinanceOps");
+        String admin = AlbTestTokens.forGroups("SettlementAdmin");
+        String forged = admin.substring(0, admin.lastIndexOf('.')) + financeOps.substring(financeOps.lastIndexOf('.'));
+
+        getSettlementAs(forged).andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(settlementService);
+    }
+
+    /** Maker-checker: the approver role cannot calculate. Also proves a @PreAuthorize denial is 403, not 500. */
+    @Test
+    void settlementAdminCannotCalculate() throws Exception {
+        patchSettlementAs(AlbTestTokens.forGroups("SettlementAdmin"), VALID_BODY)
+                .andExpect(status().isForbidden())
+                .andExpect(content().contentType(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.title").value("Forbidden"));
+
+        verifyNoInteractions(settlementService);
+    }
+
+    @Test
+    void settlementAdminCanReadSettlement() throws Exception {
+        when(settlementService.getSettlementDetail(LOAN_ID))
+                .thenReturn(CachedSettlementDetail.from(calculatedDocument()));
+
+        getSettlementAs(AlbTestTokens.forGroups("SettlementAdmin")).andExpect(status().isOk());
+    }
+
+    @Test
+    void userWithoutGroupsIs403() throws Exception {
+        getSettlementAs(AlbTestTokens.forGroups())
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(settlementService);
     }
 }
