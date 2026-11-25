@@ -12,17 +12,20 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.RejectedExecutionException;
 
 @Service
 public class LoanImportService {
 
     static final String UNAVAILABLE_MESSAGE = "Loan service temporarily unavailable";
     static final String FAILED_MESSAGE = "Import failed unexpectedly";
+    static final String CAPACITY_MESSAGE = "Import not started: too many imports in progress, try again later";
 
     private static final Logger log = LoggerFactory.getLogger(LoanImportService.class);
 
@@ -41,15 +44,36 @@ public class LoanImportService {
         this.importExecutor = importExecutor;
     }
 
-    /** Imports all loans concurrently. Returns one result per loan, in the same order as the input. */
+    /**
+     * Imports all loans concurrently. Returns one result per loan, in the same order as the input.
+     * <p>
+     * If the import pool is full, the loan that was rejected and every loan after it get
+     * IMPORT_CAPACITY_EXCEEDED. Loans that were already submitted are NOT cancelled: cancel() on a
+     * CompletableFuture does not stop a task that is already running (it would still save the loan
+     * while the user is told "not started"). Instead we wait for every submitted task, so each one
+     * reports its real outcome and nothing keeps running after the response (no orphaned imports).
+     */
     public List<ImportResult> importLoans(List<String> loanIds) {
+        List<String> ids = loanIds.stream().distinct().toList();
+        List<CompletableFuture<ImportResult>> futures = new ArrayList<>(ids.size());
+
         // Step A + B: start one async task per loan; turn unexpected errors into FAILED
-        List<CompletableFuture<ImportResult>> futures = loanIds.stream()
-                .distinct()
-                .map(id -> CompletableFuture
+        for (int i = 0; i < ids.size(); i++) {
+            String id = ids.get(i);
+            try {
+                futures.add(CompletableFuture
                         .supplyAsync(() -> importOne(id), importExecutor)
-                        .exceptionally(ex -> unexpectedFailure(id, ex)))
-                .toList();
+                        .exceptionally(ex -> unexpectedFailure(id, ex)));
+            } catch (RejectedExecutionException e) {
+                // Pool full (Spring's TaskRejectedException extends RejectedExecutionException).
+                // Thrown on THIS thread by supplyAsync, so nothing was started for this loan or the rest.
+                List<String> notStarted = ids.subList(i, ids.size());
+                log.warn("Import pool full: {} of {} loans not started", notStarted.size(), ids.size());
+                notStarted.forEach(rejectedId -> futures.add(CompletableFuture.completedFuture(
+                        new ImportResult(rejectedId, ImportOutcome.IMPORT_CAPACITY_EXCEEDED, CAPACITY_MESSAGE))));
+                break;
+            }
+        }
 
         // Step C: wait for every task and collect the results (same order as the input)
         return futures.stream()

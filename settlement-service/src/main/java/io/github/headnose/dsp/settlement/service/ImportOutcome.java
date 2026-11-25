@@ -6,5 +6,6 @@ public enum ImportOutcome {
     NOT_FOUND,                 // loan-service returned 404 (and only then)
     NOT_CLOSED,                // loan exists but isn't CLOSED, so it can't be settled
     LOAN_SERVICE_UNAVAILABLE,  // timeout, connection error, 5xx or circuit breaker open: try again later
+    IMPORT_CAPACITY_EXCEEDED,  // LSC's own import pool was full: nothing was started, try again later
     FAILED                     // unexpected error (DB error, broken answer, bug): details only in the log
 }
