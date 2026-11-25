@@ -88,3 +88,15 @@ management:
     web:
       exposure:
         include: health,metrics   # never "*": env/configprops/heapdump would expose secrets
+# Blueprint "Identity Propagation": same ALB (path-based routing) in front of LSC and PWT, so the same
+# signer and key as settlement-service. Locally our dev key pair stands in for the ALB's key (private key in
+# .local-keys/, never committed; a public key is not a secret). In AWS: keys fetched by kid (not built).
+security:
+  alb:
+    claims-header: x-amzn-oidc-data
+    signer: arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/dsp-local/0000000000000000
+    key-id: local-dev-1
+    groups-claim: groups
+    clock-skew: 60s
+    public-key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEGt+XW//2wIar/EJzPL3n+m8XDCS+
+      JyrT/HeANE7wPJBEnoa3OhaFSqtzAGwHq23hkUHfBhI2jJ5Wx6w1VfQV3g==

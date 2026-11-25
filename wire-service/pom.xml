@@ -59,10 +59,16 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-micrometer-metrics</artifactId>
 		</dependency>
-		<!-- P1: non-blocking WebClient (Reactor Netty) for the LSC call only; JDBC stays blocking.
-             The WebClient starter, NOT spring-boot-starter-webflux: we need the client, not a reactive
-             server. With webmvc on the classpath the app stays a servlet (Tomcat) application.
-             Replaces spring-boot-starter-restclient (SettlementServiceClient was its only user). -->
+		<!-- Blueprint "Authentication and Authorization": own Spring Security setup (not shared with LSC). -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<!-- ES256 verification of the ALB's x-amzn-oidc-data JWT (brings Nimbus in Spring Security's version). -->
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-oauth2-jose</artifactId>
+		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webclient</artifactId>
@@ -110,6 +116,12 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 		<dependency>
