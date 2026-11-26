@@ -4,7 +4,7 @@ A personal learning project: Java/Spring Boot microservices that model a dealer 
 and wire-notification workflow. Built to practice microservice design, concurrency, MongoDB/MySQL,
 Kafka, Redis, S3-compatible object storage, resilience patterns, Spring Security (user
 authentication behind a load balancer, role-based access, service-to-service OAuth2 tokens), and
-observability (metrics and distributed tracing).
+observability (metrics, distributed tracing and structured logs).
 
 **Status:** 🚧 In progress
 
@@ -39,7 +39,7 @@ settlement-service call. See [Authentication and authorization](#authentication-
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
 Spring Security (OAuth2 resource server and client) · Keycloak ·
 Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
-Spring Boot Actuator + Micrometer · Prometheus · Grafana · OpenTelemetry · Jaeger · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
+Spring Boot Actuator + Micrometer · Prometheus · Grafana · OpenTelemetry · Jaeger · structured logging (ECS) · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
 GreenMail · k6 · Toxiproxy
 
 ## Running locally
@@ -1588,7 +1588,7 @@ The blueprint's "Monitoring" lists Prometheus for metrics, Grafana for dashboard
 Actuator for the application side, and names what to watch: request latency (p50/p95/p99), error
 rates, JVM, thread pools and Kafka consumer lag. This part builds that locally. Tracing
 (OpenTelemetry) is [part 2](#observability-part-2-tracing-opentelemetry--jaeger); structured logs
-come next (see Roadmap).
+are [part 3](#observability-part-3-structured-logs).
 
 ### What was built
 
@@ -1747,7 +1747,8 @@ not comparable with the load-test tables).
   - Result: 5 scrape traces in 30 s → **0**, and **0** orphan traces; the trace of one
     `POST /api/v1/wires` went from 13 to **9** spans.
 - **Log correlation came for free:** every log line now has a `[traceId-spanId]` column (Boot's default
-  correlation pattern once Micrometer Tracing is active). Structured JSON logs are part 3.
+  correlation pattern once Micrometer Tracing is active). Structured JSON logs are
+  [part 3](#observability-part-3-structured-logs).
 
 ### Try it
 
@@ -1877,6 +1878,158 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
   The load-test numbers in the sections above were measured without tracing and were not re-measured.
 - Durations are from single requests, not from a load test.
 
+## Observability, part 3: structured logs
+
+The blueprint's "Centralized Logging": structured logs with `traceId`, `spanId`, `submissionId`,
+`loanId` and `userId` in every entry, so one search finds everything about a wire or a loan, plus
+the ELK stack to collect them. This part builds the log side in all three services; collecting the
+files into Elasticsearch/Kibana is not built yet (see Roadmap). Every output below is from my own
+runs on 2026-11-25/26 (services started with `mvn spring-boot:run`).
+
+### What was built
+
+- **One JSON event per line in a file, plain text on the console** (LG1). Boot's built-in structured
+  logging (`logging.structured.format.file: ecs`, no encoder library) writes
+  `logs/<service>.json` in the Elastic Common Schema (ECS 8.11); the console stays as it was, because
+  people read the console and machines read the file. In AWS the container would set
+  `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs` instead, because ECS/Fargate collects stdout: the format is
+  a deployment setting, not code. `logs/` is git-ignored. `service.name` is filled in from
+  `spring.application.name` without any setting.
+- **Every MDC entry becomes a top-level JSON key under its own name.** The tracer already puts
+  `traceId` and `spanId` there (part 2), so our keys are simply the blueprint's names: `userId`,
+  `loanId`, `submissionId` (`MdcKeys`, one copy per service). ECS's own name for the trace is
+  `trace.id`; the blueprint's `traceId` is kept, because correlation only needs everyone to use the
+  same name.
+- **Where each value comes from** (LG2):
+
+| Field | Set by | Services |
+|---|---|---|
+| `userId` | `UserMdcFilter` in the security chain, right before `AuthorizationFilter`: the ALB token's subject, or the service token's subject | settlement, wire |
+| `loanId` | `PathIdMdcInterceptor` for `{loanId}` in the URL (GET / PATCH settlements) | settlement |
+| `loanId` | each import task, per loan, on its `loan-import-` thread (one request imports several loans) | settlement |
+| `loanId` | the generate endpoint, from the request body | wire |
+| `submissionId` | `PathIdMdcInterceptor` for `{submissionId}` in the send URL | wire |
+| `submissionId`, `loanId` | the Kafka listeners, from the event, while it is handled | wire (delivery-status job), notification |
+
+  The filter runs after both kinds of authentication and before the 403 decision, so a denied
+  request is logged with its user; the interceptor runs before `@PreAuthorize` and is cleaned up
+  after `GlobalExceptionHandler`, so 403 and error lines have the id too. Every value is removed when
+  the request or event is done (try-with-resources / `afterCompletion`): Tomcat and Kafka reuse
+  their threads, and a leftover `userId` would end up on the next user's lines.
+- **The blueprint's example line exists:** `DeliveryStatusService` logs
+  `Wire submission status updated to SENT` once per wire, when its event wins the `QUEUED` → `SENT`
+  update. Before that, wire-service wrote no line of its own on the happy path.
+- **Test logs go to `target/`.** Surefire passes `logging.file.name=target/test-logs/<artifactId>.json`
+  as a JVM system property (root `pom.xml`), which outranks `application.yaml`; before, every
+  `@SpringBootTest` appended to the same file as the dev runs.
+
+One real line (wire-service, the delivery-status job):
+
+```json
+{"@timestamp":"2026-11-26T05:17:56.100675Z","log":{"level":"INFO","logger":"io.github.headnose.dsp.wire.service.DeliveryStatusService"},"process":{"pid":89317,"thread":{"name":"org.springframework.kafka.KafkaListenerEndpointContainer#0-0-C-1"}},"service":{"name":"wire-service","node":{}},"message":"Wire submission status updated to SENT","traceId":"d0434e82f4a5b5545784bd7b4316a41d","spanId":"ede2c676a854463c","submissionId":"SUB-2f64ee84-f494-47e6-83e6-b1ac52cc4607","loanId":"LN-1002","ecs":{"version":"8.11"}}
+```
+
+### Thread hops: the MDC is a ThreadLocal too
+
+Part 2 put `ContextPropagatingTaskDecorator` on the import pool, and its log lines got the
+`traceId`. That is all it carried: the tracer restores the trace and writes `traceId` / `spanId`
+back into the MDC itself, but nothing else in the MDC travels. An import with loan-service down
+logged its `loan-import-1` WARN with the request's `traceId` but **without** `userId`.
+
+- **Thread pool:** `MdcPropagationConfig` registers Micrometer's `Slf4jThreadLocalAccessor` for our
+  keys only (`userId`, `loanId`, `submissionId`) in the global `ContextRegistry`, which the decorator
+  reads. Only our keys: the library's own javadoc warns against it when another accessor (the
+  tracer) manages the same MDC entries. After that, the WARN had `"userId":"dev-finops"`; two loans of
+  one request on `loan-import-1` / `loan-import-2` each had their own `loanId` and the same `traceId`.
+- **Reactor (wire-service's settlement-service call):** the call runs on `boundedElastic` (token
+  fetch) and a Reactor Netty thread (response). Three runs of the same `POST /api/v1/wires`, read
+  from WebClient's DEBUG lines (`ExchangeFunctions`):
+
+| Run | Setting | `traceId` on both threads | `userId`, `loanId` |
+|---|---|---|---|
+| A | `spring.reactor.context-propagation: limited` (Boot's default) | no | no |
+| B | `auto` | **yes** | no |
+| C | `auto` + `contextCapture()` before `toFuture()` | yes | **yes** |
+
+  `auto` restores ThreadLocals from the *Reactor Context* on every operator. WebClient writes its own
+  observation into that Context, so the trace arrived in B. Our MDC values existed only as
+  ThreadLocals on the request thread; `contextCapture()` copies the registered ThreadLocals into the
+  Context at subscription, and `toFuture()` is where the subscription happens, so it is the last
+  operator.
+
+### End to end: one search finds the whole wire
+
+Generate as `FinanceOps`, send as `SettlementAdmin`, then search every log file for the submission:
+
+```bash
+grep -c "$SUB" settlement-service/logs/settlement-service.json wire-service/logs/wire-service.json notification-service/logs/notification-service.json
+grep -h "$SUB" wire-service/logs/wire-service.json notification-service/logs/notification-service.json \
+  | grep -oE '"name":"[a-z]+-service"|"traceId":"[0-9a-f]{8}|"message":"[^"]{0,50}'
+```
+
+First run (LN-1001, `SUB-5a947057-…`, before the "updated to SENT" line):
+
+| Service | Lines | What they were |
+|---|---|---|
+| settlement-service | 0 | it never sees a `submissionId` |
+| wire-service | 6 | the Kafka producer's startup lines (created lazily inside the first send request, so they carry the request's `submissionId`); nothing of our own |
+| notification-service | 10 | the same producer startup lines plus 4 × `Email sent: submissionId=…`, one per recipient |
+
+Every one of them had the same `traceId` (`47b51d17…`), from the send request to BlastMail's
+listener, and BlastMail's lines carry `submissionId` and `loanId` as fields, not only in the text.
+
+Second run (LN-1002, `SUB-2f64ee84-…`, with the new line): wire-service's
+`Wire submission status updated to SENT` and BlastMail's `Email sent` lines have the same `traceId`
+(`d0434e82…`), `submissionId` and `loanId`. So `submissionId:SUB-2f64ee84…` (or the `traceId`) in a
+log search returns the whole story: send request → four emails → done.
+
+### What the blueprint lists that is not logged
+
+The blueprint's field list also names `endpoint`, `status` and `errorCode`. Endpoint and status are
+already in the request metrics (`http_server_requests`, part 1) and in every server span (part 2);
+`errorCode` is not defined anywhere in the blueprint, and inventing an error-code scheme for logs
+alone would add a second source of truth next to the Problem Details `title`. Not built, on purpose.
+
+### Tests
+
+- `UserMdcFilterTest` (settlement, wire): `userId` is there while the chain runs and gone after it,
+  also when the chain throws; an anonymous request gets none.
+- `MdcPropagationConfigTest` (settlement, wire): a value put on one thread is seen by a task decorated
+  with `ContextPropagatingTaskDecorator` on another thread, and is gone after the task (reused pool
+  threads).
+- `PathIdMdcInterceptorTest` (settlement, wire), `LoanImportServiceMdcTest` (each loan of a batch has
+  its own `loanId` while loan-service is called), `DeliveryStatusListenerTest` and
+  `EmailDeliveryListenerTest` (the event's ids while it is handled, none afterwards).
+- `SettlementServiceClientContextTest`: with automatic propagation on and our keys registered, the
+  caller's `userId` and `loanId` are in the MDC on the `reactor-http` thread that handles the
+  response.
+- Broken once on purpose to see them fail: `MdcPropagationConfigTest` without the registration, and
+  `EmailDeliveryListenerTest` without the MDC code (both `expected … but was: null`).
+- 225 tests in the whole build (loan 3, settlement 118, wire 82, notification 22).
+
+### Predictions vs measurements
+
+| Check | Predicted | Measured |
+|---|---|---|
+| Executor thread before the accessor | `traceId` yes, `userId` no | yes / no |
+| Executor thread after | `userId` and each task's own `loanId` | yes |
+| Reactor with `auto` | all fields on both threads | **wrong**: only `traceId` (WebClient's observation is in the Context, our MDC is not) |
+| Reactor with `auto` + `contextCapture()` | all fields | yes |
+| End to end | settlement 0 lines; one `traceId` across wire and BlastMail | yes; but wire wrote no line of its own until the "updated to SENT" line was added |
+
+### What went wrong on the way
+
+- **YAML indentation, again.** The first `auto` run had `reactor:` indented under `application:`, so
+  the property was `spring.application.reactor.context-propagation`, which Spring ignores without a
+  warning; that run measured `limited` a second time.
+- **Old processes on the port.** Twice a new run never started (or was never restarted) because an
+  older one still held the port, and the request went to the old code: a failed start on 8083, and
+  an hours-old notification-service on 8084 that would have shown "no BlastMail lines" for the wrong
+  reason. The `pid` in each JSON line is the quick check.
+- **IntelliJ staged the new classes while they were still empty.** `git diff --staged --stat` listed
+  them with 4 lines each (package line and empty class); they were unstaged and added again with
+  their content before the commit.
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -1961,6 +2114,10 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
       (wire → settlement → loan-service), the import thread pool and both Kafka hops, with the
       blueprint's `submissionId` / `loanId` Kafka headers; scrape and Spring Security filter-chain noise
       removed; verified with one 27-span trace for a whole send (Workflow 4)
+- [x] Observability, part 3: ECS JSON log file in every service with `traceId`, `spanId`, `userId`,
+      `loanId` and `submissionId` as fields, carried onto the import pool and Reactor threads, and the
+      blueprint's "Wire submission status updated to SENT" line; verified end to end (one `traceId`
+      and `submissionId` across wire-service and notification-service for one send)
 
 ## Roadmap
 
@@ -1980,7 +2137,9 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
 - [x] Observability, part 1: metrics (Prometheus, Grafana, dashboard)
 - [x] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka
-- [ ] Observability, part 3: structured JSON logs with trace IDs and business fields (ELK optional) (next)
+- [x] Observability, part 3: structured JSON logs with trace IDs and business fields
+- [ ] Optional: ELK compose profile (Elasticsearch, Kibana, Filebeat reading `logs/*.json`)
+- [ ] Dockerfiles and building the images in CI (next)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
 - [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
@@ -2119,8 +2278,8 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
 - loan-service has no tracing (mock): settlement-service's client span is the last hop
 - A business 404 from loan-service is recorded as an `exception` on the client span, so `NOT_FOUND`
   imports look like errors in Jaeger
-- Log lines written on Reactor threads (e.g. `boundedElastic`, where wire-service fetches its token)
-  have no traceId: the trace context is not carried onto Reactor threads (part 3)
+- Reactor threads get the trace and our MDC fields only where the chain ends in `contextCapture()`
+  (wire-service's settlement-service call, the only Reactor chain today); a new reactive call needs it too
 - `/actuator` requests produce neither spans nor `http.server.requests` metrics any more (one
   predicate drops the observation, and metrics and spans come from it); the dashboard excluded them
   anyway
@@ -2131,3 +2290,14 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
 - Jaeger keeps traces in memory: a restart or `docker compose down` deletes them
 - wire-service reuses a service token for 4 of its 5 minutes (Spring Security's 60 s clock skew); the
   first call after that pays the token fetch (about 74 ms warm, more when cold)
+- The JSON log files are only written locally; nothing ships them anywhere yet (no ELK). They rotate with
+  Boot's defaults, and the relative path `logs/` lands under the directory the app was started from
+  (the module folder for `mvn spring-boot:run`, the project root for `java -jar`)
+- Retry and dead-letter log lines of both Kafka consumers are written by the error handler after the
+  listener returned, so they have the `traceId` but not `submissionId` / `loanId`
+- wire generation's error lines (502 / 503 from `GlobalExceptionHandler`) are written after the
+  controller has removed `loanId` from the MDC; their message text names the loan
+- MDC values taken from the URL are user input: the JSON file escapes them, the plain-text console
+  does not (a decoded newline could fake a console line)
+- `endpoint`, `status` and `errorCode` from the blueprint's field list are not in the logs (metrics and
+  spans carry endpoint and status; the blueprint defines no error codes)
