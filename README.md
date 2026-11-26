@@ -794,14 +794,49 @@ Errors:
 The dead-letter topic keeps the original message text unchanged, with Spring's exception headers,
 so it can be inspected and replayed.
 
+### Automatic redrive of dead-lettered events
+
+The blueprint's "Support / Retry Job". Each service runs `DeadLetterRedriveJob` on the DLQ it writes
+to: notification-service on `email-delivery-dlq`, wire-service on `delivery-status-dlq`. It sends a
+dead-lettered event back to the topic it came from once the failure had time to fix itself (SMTP or
+S3 back up, database back):
+
+| Dead-lettered because | What the job does |
+|---|---|
+| Not retryable (the same list as the main listener: bad JSON, invalid event, statement file missing) | Parks it: WARN line, the event stays in the DLQ for the manual replay |
+| Anything else (SMTP down, S3 unavailable, `PROCESSING` key still held, database error, ...) | Waits until 5 minutes after the event's timestamp, then sends it back |
+| Already sent back 3 times | Parks it: WARN line with "gave up after 3 redrives" |
+
+- **The rules are one class**, `DeadLetterRedrivePolicy`, with no Kafka calls and "now" passed in:
+  `DeadLetterRedrivePolicyTest` covers each row above.
+- **Which failure** is read from the `kafka_dlt-exception-cause-fqcn` header that Spring's
+  `DeadLetterPublishingRecoverer` adds. A subclass of a not-retryable type is not retryable either.
+- **Counting rounds**: the job adds a `dsp-redrive-count` header when it sends an event back. The
+  recoverer copies the event's headers when it dead-letters it again, so the count survives the trip.
+- **Same key, same partition**: the event goes back with its `submissionId` key, so per-wire ordering
+  holds. Its own headers go back too (`traceparent`: the retry continues the original trace); Spring's
+  `kafka_dlt-*` headers are dropped.
+- **Waiting without blocking the consumer**: a record that is not due yet is `nack`ed with the time
+  left (at most 30 s at a time), which pauses and re-reads it. Manual acks: the DLQ offset is committed
+  only after the event was sent back (the send waits for the broker) or parked.
+- **Its own consumer group** (`blastmail-dlq-redrive`, `pwt-dlq-redrive`), so reading the DLQ by
+  hand still sees everything. A new group starts at the end of the DLQ, so turning the job on does not
+  resend 30 days of old dead letters.
+- **Its own listener container**, not Boot's: with Boot's, the main listener's error handler would
+  dead-letter the job's own failures into the DLQ it is reading. If sending back fails (Kafka down),
+  it tries again every 10 s and skips nothing.
+- Settings (`dlq-redrive.*`): `enabled: true`, `delay: 5m`, `max-redrives: 3`. 5 minutes is also
+  BlastMail's `PROCESSING` key TTL, so an event that failed because a crashed attempt still held the
+  key is sent back just after the key expired.
+
 ### Kafka topics
 
 | Topic | Producer | Consumer (group) | Partitions | Retention |
 |---|---|---|---|---|
 | `email-delivery` | wire-service | notification-service (`blastmail`) | 6 | 7 days |
 | `delivery-status` | notification-service | wire-service (`pwt-delivery-status`) | 6 | 7 days |
-| `email-delivery-dlq` | notification-service | support / replay | 6 | 30 days |
-| `delivery-status-dlq` | wire-service | support / replay | 6 | 30 days |
+| `email-delivery-dlq` | notification-service | notification-service (`blastmail-dlq-redrive`), support / replay | 6 | 30 days |
+| `delivery-status-dlq` | wire-service | wire-service (`pwt-dlq-redrive`), support / replay | 6 | 30 days |
 
 Each service declares the topics it produces to, so every topic has one owner that sets its
 partitions and retention. Producers use `acks=all` with idempotence enabled. Replication factor
@@ -876,7 +911,8 @@ headers such as `kafka_dlt-exception-fqcn` (Spring's `ListenerExecutionFailedExc
 `kafka_dlt-exception-cause-fqcn` (`EmailSendException`) and `kafka_dlt-original-topic`.
 
 To replay, bring SMTP back and copy the dead-lettered events, with their keys, back to
-`email-delivery`. This is a manual stand-in for the blueprint's "Support / Retry Job":
+`email-delivery`. This manual replay is still the way to resend parked events; retryable failures are
+also sent back automatically by the [redrive job](#automatic-redrive-of-dead-lettered-events):
 
 ```bash
 docker compose start mailpit
@@ -2282,7 +2318,8 @@ On the first start Filebeat also read the older files from earlier runs (220 wir
 - [x] Observability, part 3: structured JSON logs with trace IDs and business fields
 - [x] Observability, part 4: ELK compose profile (Elasticsearch, Kibana, Filebeat reading `logs/*.json`)
 - [x] Dockerfiles and building the images in CI (build only; no registry yet)
-- [ ] Automated retry job for the dead-letter topics
+- [x] Automated retry job for the dead-letter topics (`DeadLetterRedriveJob`: delayed redrive of
+      retryable failures, max 3 rounds, then parked)
 - [ ] Maybe: a short-lived AWS demo deployment
 - [x] Small: more CLOSED sample loans: 200 demo loans `LN-5001` to `LN-5200` (every end-to-end run
       uses one up, because each loan can be sent only once)
@@ -2342,10 +2379,17 @@ On the first start Filebeat also read the older files from earlier runs (220 wir
   Redis key is marked `SENT` can send that email twice
 - If notification-service crashes while sending, a redelivered event finds the `PROCESSING` key,
   exhausts its retries within seconds, and is dead-lettered without a `FAILED` result; the
-  recipient stays `PENDING` until the event is replayed (after the 5-minute key expiry)
+  recipient stays `PENDING` until the redrive job sends the event back (5 minutes later, when the
+  `PROCESSING` key has expired)
 - Retries block their partition: while one event is retried, later events on the same partition
   wait (non-blocking retry topics would avoid this)
-- Dead-letter replay is a manual command; there is no automated retry job yet
+- The redrive job's delay counts from the original event's timestamp (Spring's dead-letter record keeps it),
+  not from when it failed; with a consumer far behind, an event can be redriven sooner than 5 minutes after it
+  failed
+- A parked event (not retryable, or 3 redrives used up) needs the manual replay; nothing alerts on it except
+  its WARN line
+- The redrive job's consumer group starts at the end of the DLQ the first time it runs: events dead-lettered
+  before that are left for the manual replay
 - Every dead-lettered record logs a full stack trace at WARN, which is noisy
 - Both services use the same local S3 credentials; a real setup would give wire-service write
   access and notification-service read-only access to the bucket
