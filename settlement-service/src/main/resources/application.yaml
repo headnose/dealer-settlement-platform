@@ -103,3 +103,13 @@ security:
     clock-skew: 60s
     public-key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEGt+XW//2wIar/EJzPL3n+m8XDCS+
       JyrT/HeANE7wPJBEnoa3OhaFSqtzAGwHq23hkUHfBhI2jJ5Wx6w1VfQV3g==
+# O3 (LG1): people read the console (plain text, unchanged); machines read this file (ECS JSON, one event
+# per line, the field names Elasticsearch/Kibana expect). In AWS the container sets
+# LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs instead, because ECS/Fargate collects stdout.
+# Relative path: lands under the directory the app was started from (git-ignored).
+logging:
+  file:
+    name: logs/${spring.application.name}.json
+  structured:
+    format:
+      file: ecs
