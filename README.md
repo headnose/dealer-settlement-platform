@@ -61,7 +61,7 @@ mvn clean install             # build all modules and run tests
 | `mailpit` | 1025 (SMTP), 8025 (web UI) | notification-service |
 | `seaweedfs` | 8333 (S3 API), 23646 (admin UI) | wire-service (upload), notification-service (download) |
 | `keycloak` | 8180 (admin console: admin / admin, local only) | issues wire-service's token for settlement-service (realm `dsp`, imported from `keycloak/dsp-realm.json`) |
-| `toxiproxy` | 8474 (API), 13306, 18082, 18081 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
+| `toxiproxy` | 8474 (API), 13306, 18082, 18081, 18333, 19092 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
 | `prometheus` | 9090 | scrapes the services' metrics (profile `observability`, not started by `up -d`; see [Observability](#observability-part-1-metrics-prometheus--grafana)) |
 | `grafana` | 3000 (admin / admin, local only) | the DSP Overview dashboard (profile `observability`) |
 | `jaeger` | 16686 (UI), 4318 (OTLP over HTTP) | receives and shows the services' traces (profile `observability`; see [Tracing](#observability-part-2-tracing-opentelemetry--jaeger)) |
@@ -1676,6 +1676,90 @@ Written down before each run.
 - The breaker settings (including the new 2 s / 50%) and the pool size are still starting values.
 - The latency toxic has no jitter, so every slow call takes exactly the same time; I5 shows this changes
   how freed slots are shared between requests.
+
+## Timeouts under load: the send path
+
+The last part of the request path not yet tested under load: `POST /api/v1/wires/{submissionId}/send`
+uploads the statement to S3, claims the wire (`DRAFT` → `QUEUED`), then publishes 4 email-delivery
+events and waits for Kafka to acknowledge them. What happens when S3 or Kafka is **slow**? The timeouts
+were starting values: S3 2 s per attempt and 5 s per call (`storage.api-call-attempt-timeout`,
+`storage.api-call-timeout`), Kafka 5 s per request and 10 s per send including retries
+(`request.timeout.ms`, `delivery.timeout.ms`), and the publisher's own 15 s wait.
+
+### Setup
+
+- **Script:** [`load-test/wire-send.js`](load-test/wire-send.js), k6, open model, same shape as
+  `wire-generation.js` (`EXPECT_STATUS`, `PRE_VUS`/`MAX_VUS`, a gauge sampler, the server timer per status
+  in teardown).
+- **Drafts are seeded, not generated.** Each send needs its own `DRAFT` for its own loan (the duplicate
+  guard), and a run needs hundreds. The send path reads only MySQL, so
+  [`load-test/seed-send-drafts.sql`](load-test/seed-send-drafts.sql) inserts `@n` drafts with 4 recipients
+  each, ids `SUB-LT-<run>-1..n`, loan ids `LT-<run>-<i>` that exist nowhere else. Iteration *i* of the
+  script sends `SUB-LT-<run>-<i>`; it refuses to start if fewer than rate × duration drafts were seeded.
+- **S3 and Kafka through Toxiproxy** (new proxies `seaweedfs` on 18333 and `kafka` on 19092). Kafka needs
+  more than a TCP proxy: a client asks the broker where to connect and would go straight to
+  `localhost:9092`. A fourth listener, `TOXI`, advertises `localhost:19092`, so a client that bootstraps
+  through the proxy stays on it. MySQL and settlement-service stay direct.
+- **notification-service stopped** during the runs: only the send path is measured, and Mailpit does not
+  get thousands of test emails. Its offsets are moved past the test events afterwards (below).
+
+```bash
+docker compose --profile apps stop wire-service notification-service   # if the apps profile is running
+docker compose up -d kafka                                             # picks up the TOXI listener
+docker compose up -d toxiproxy
+SECURITY_ALB_PUBLICKEY="$(cat .local-keys/alb-dev-public.pem)" java -jar wire-service/target/wire-service-0.1.0-SNAPSHOT.jar \
+  --storage.endpoint=http://localhost:18333 --spring.kafka.bootstrap-servers=localhost:19092
+ADMIN=$(java dev-tools/AlbDevToken.java dev-admin SettlementAdmin 60)
+
+# per run: seed, add a toxic, run, check, remove the toxic
+(echo "SET @run='S1'; SET @n=600;"; cat load-test/seed-send-drafts.sql) | docker compose exec -T mysql mysql -udsp -pdsp wire_db
+curl -X POST localhost:8474/proxies/seaweedfs/toxics -H "Content-Type: application/json" \
+  -d '{"name":"s3_latency","type":"latency","stream":"downstream","attributes":{"latency":3000,"jitter":0}}'
+k6 run -e TOKEN="$ADMIN" -e RUN=S1 -e COUNT=600 -e RATE=10 -e DURATION=60s load-test/wire-send.js
+docker compose exec mysql mysql -udsp -pdsp wire_db -e "SELECT status, COUNT(*) FROM wire_submission WHERE submission_id LIKE 'SUB-LT-S1-%' GROUP BY status;"
+curl -X DELETE localhost:8474/proxies/seaweedfs/toxics/s3_latency
+```
+
+For Kafka, the same toxic on the `kafka` proxy (`/proxies/kafka/toxics`). Count a run's events that
+reached the topic anyway:
+
+```bash
+docker compose exec kafka sh -c '/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic email-delivery --from-beginning --timeout-ms 10000 --property print.key=true 2>/dev/null | grep -c "^SUB-LT-S5-"'
+```
+
+### Runs and predictions
+
+| Run | Toxic | Rate | Sends | Expected | Prediction (from the timeouts) |
+|---|---|---|---|---|---|
+| S1 | none | 10/s | 600 | `202` | all `QUEUED`; tens of ms (local S3 upload + one Kafka acknowledgment) |
+| S2 | S3 +1.5 s | 10/s | 600 | `202` | about 1.5 s each, under the 2 s attempt timeout; Tomcat busy ≈ 10 × 1.5 = 15 |
+| S3 | S3 +3 s | 10/s | 600 | `503` | each attempt times out at 2 s, the SDK retries, the 5 s call timeout ends it: `503` at about 5.0 s; all still `DRAFT` (the upload comes before the claim); Tomcat busy ≈ 50 |
+| S4 | Kafka +2 s | 10/s | 600 | `202` | about 2 s each, under the 5 s request timeout; all `QUEUED` |
+| S5 | Kafka +6 s | 10/s | 600 | `503` | each produce request times out at 5 s, the producer retries, `delivery.timeout.ms` fails the send at about 10 s, before the publisher's 15 s; the claim is reverted: all `DRAFT`; Tomcat busy ≈ 100 |
+| S6 | Kafka +6 s | 25/s | 1,500 | `503` | 25 × 10 s = 250 in flight > 200 Tomcat threads: requests queue for a thread, k6 sees far more than 10 s (like T3) while the server timer still says about 10 s |
+
+The question S5 is really about: the latency toxic delays the broker's **answers**, not the requests. The
+broker probably writes the 4 events and only its acknowledgment is late, so wire-service gives up, puts
+the wire back to `DRAFT` and answers `503`, while the events are already in `email-delivery`. If the count
+above shows S5 events, a "failed" send can still lead to emails (BlastMail would send them once it runs;
+a retried send publishes again and BlastMail's `recipientId` check stops the second email). That is the
+gap the known limitation "no transactional outbox" describes, seen from the other side.
+
+### Results
+
+Not run yet.
+
+### Clean up after the runs
+
+```bash
+docker compose exec mysql mysql -udsp -pdsp wire_db -e "DELETE r FROM wire_recipient r JOIN wire_submission s ON s.submission_id = r.submission_id WHERE s.loan_id LIKE 'LT-%'; DELETE FROM wire_submission WHERE loan_id LIKE 'LT-%';"
+# notification-service must be stopped (an active group cannot be reset); skips the test events
+docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:9092 \
+  --group blastmail --topic email-delivery --reset-offsets --to-latest --execute
+```
+
+The uploaded statements stay in the `wire-statements` bucket (`SUB-LT-*`); SeaweedFS has no volume, so
+`docker compose down` removes them.
 
 ## Observability, part 1: metrics (Prometheus + Grafana)
 
