@@ -43,4 +43,21 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <build>
+        <plugins>
+            <!-- O3: tests write their ECS log file into target/ (deleted by mvn clean), not into the module's
+                 logs/ folder that dev runs use. A JVM system property outranks application.yaml in Boot.
+                 Version comes from spring-boot-starter-parent. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <systemPropertyVariables>
+                        <logging.file.name>${project.build.directory}/test-logs/${project.artifactId}.json</logging.file.name>
+                    </systemPropertyVariables>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
