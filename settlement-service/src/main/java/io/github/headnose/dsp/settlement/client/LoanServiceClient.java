@@ -82,9 +82,12 @@ public class LoanServiceClient {
     // invoked through the Spring proxy; they carry no annotation, so the proxy just forwards the call.
     // Not part of the client's API: callers use getLoan only.
 
-    /** Circuit is open: no HTTP call was made at all (fail fast). */
+    /**
+     * Circuit is open: no HTTP call was made at all (fail fast). DEBUG, not WARN: the breaker opening is
+     * logged once by CircuitBreakerStateLogger; a WARN here was one line per loan (~12/s at 2 imports/s).
+     */
     public Optional<LoanDto> loanServiceUnavailable(String loanId, CallNotPermittedException e) {
-        log.warn("loan-service circuit open, not calling it for loan {}", loanId);
+        log.debug("loan-service circuit open, not calling it for loan {}", loanId);
         throw new LoanServiceUnavailableException(loanId, e);
     }
 
