@@ -20,11 +20,14 @@ public class KafkaTopicConfig {
 
     private final int partitions;
     private final int replicationFactor;
+    private final int minInsyncReplicas;
 
     public KafkaTopicConfig(@Value("${topics.partitions}") int partitions,
-                            @Value("${topics.replication-factor}") int replicationFactor) {
+                            @Value("${topics.replication-factor}") int replicationFactor,
+                            @Value("${topics.min-insync-replicas}") int minInsyncReplicas) {
         this.partitions = partitions;
         this.replicationFactor = replicationFactor;
+        this.minInsyncReplicas = minInsyncReplicas;
     }
 
     @Bean
@@ -33,6 +36,8 @@ public class KafkaTopicConfig {
                 .partitions(partitions)
                 .replicas(replicationFactor)
                 .config(TopicConfig.RETENTION_MS_CONFIG, SEVEN_DAYS_MS)
+                // acks=all only waits for the replicas currently in sync: min ISR makes it mean "at least N".
+                .config(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, String.valueOf(minInsyncReplicas))
                 .build();
     }
 
@@ -42,6 +47,8 @@ public class KafkaTopicConfig {
                 .partitions(partitions)
                 .replicas(replicationFactor)
                 .config(TopicConfig.RETENTION_MS_CONFIG, THIRTY_DAYS_MS)
+                // acks=all only waits for the replicas currently in sync: min ISR makes it mean "at least N".
+                .config(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, String.valueOf(minInsyncReplicas))
                 .build();
     }
 }
