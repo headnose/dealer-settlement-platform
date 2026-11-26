@@ -1,0 +1,16 @@
+# Only the poms and src/ of each module are needed to build an image.
+.git
+.github
+**/target
+logs
+**/logs
+.local-keys
+.idea
+*.iml
+.DS_Store
+dev-tools
+keycloak
+load-test
+observability
+README.md
+docker-compose.yml
