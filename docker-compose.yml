@@ -164,6 +164,18 @@ services:
     ports:
       - "3000:3000"                    # UI: http://localhost:3000
 
+  # O2 (blueprint "Request Tracing"): trace backend. Jaeger v2 = one binary built on the OpenTelemetry
+  # Collector; receives OTLP from the services on the Mac and shows traces in its UI.
+  # Same profile as Prometheus/Grafana: `docker compose --profile observability up -d` (or `up -d jaeger`).
+  # Default config = in-memory storage: a restart or `down` empties it (local only).
+  # NOT jaegertracing/all-in-one: that is the legacy v1 image (end of life 31 Dec 2025).
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
+    container_name: dsp-jaeger
+    profiles: ["observability"]
+    ports:
+      - "16686:16686"                  # UI: http://localhost:16686
+      - "4318:4318"                    # OTLP over HTTP (the apps export here; Boot's default transport)
 volumes:
   mysql-data:
   mongo-data:

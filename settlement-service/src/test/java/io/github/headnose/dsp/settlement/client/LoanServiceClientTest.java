@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.client.HttpServerErrorException;
 import org.springframework.web.client.ResourceAccessException;
+import org.springframework.web.client.RestClient;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -53,7 +54,8 @@ class LoanServiceClientTest {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0); // port 0 = any free port
         server.start();
         String baseUrl = "http://localhost:" + server.getAddress().getPort();
-        client = new LoanServiceClient(baseUrl, CONNECT_TIMEOUT, READ_TIMEOUT);
+        // plain builder: these tests check HTTP behaviour, not observations
+        client = new LoanServiceClient(RestClient.builder(), baseUrl, CONNECT_TIMEOUT, READ_TIMEOUT);
     }
 
     @AfterEach
