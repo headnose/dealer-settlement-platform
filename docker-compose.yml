@@ -70,6 +70,13 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    # Used by the "apps" profile: the services wait for a broker that answers, so KafkaAdmin can create
+    # their topics on startup (it only logs an error and moves on if the broker is not up yet).
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
 
   # Fake SMTP server: catches emails so you can view them in a browser, week 3
   mailpit:
@@ -176,6 +183,131 @@ services:
     ports:
       - "16686:16686"                  # UI: http://localhost:16686
       - "4318:4318"                    # OTLP over HTTP (the apps export here; Boot's default transport)
+  # ---------------------------------------------------------------------------------------------------
+  # Profile "apps": the four services as containers, built from the root Dockerfile. Not started by a
+  # plain `docker compose up -d`; start with `docker compose --profile apps up -d --build`.
+  # Same host ports as running them from the IDE (8081-8084), so stop those first.
+  # Environment variables override the localhost addresses in each application.yaml with the compose
+  # service names (Spring Boot relaxed binding: clients.loan-service.base-url -> CLIENTS_LOANSERVICE_BASEURL).
+  # Healthcheck: the port opens only after the Spring context has started (KafkaAdmin has already created
+  # the topics by then). The JRE image has no curl, so it uses bash's /dev/tcp.
+  # ---------------------------------------------------------------------------------------------------
+  loan-service:
+    build:
+      context: .
+      args:
+        SERVICE: loan-service
+    image: dsp/loan-service:local
+    container_name: dsp-loan-service
+    profiles: ["apps"]
+    ports:
+      - "8081:8081"
+    healthcheck: &app-healthcheck
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8081"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  settlement-service:
+    build:
+      context: .
+      args:
+        SERVICE: settlement-service
+    image: dsp/settlement-service:local
+    container_name: dsp-settlement-service
+    profiles: ["apps"]
+    depends_on:
+      mongodb:
+        condition: service_started
+      redis:
+        condition: service_started
+      keycloak:
+        condition: service_started
+      loan-service:
+        condition: service_healthy
+    environment:
+      SPRING_MONGODB_URI: mongodb://mongodb:27017/settlement_db
+      SPRING_DATA_REDIS_HOST: redis
+      # Inside Docker, wire-service asks keycloak:8080 for its token, so the token's issuer is this URL
+      SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUERURI: http://keycloak:8080/realms/dsp
+      CLIENTS_LOANSERVICE_BASEURL: http://loan-service:8081
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      # Passed through from your shell when set (see "Try it"); when not set, the committed dev key is used
+      SECURITY_ALB_PUBLICKEY:
+    ports:
+      - "8082:8082"
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8082"]
+
+  notification-service:
+    build:
+      context: .
+      args:
+        SERVICE: notification-service
+    image: dsp/notification-service:local
+    container_name: dsp-notification-service
+    profiles: ["apps"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      blastmail-redis:
+        condition: service_started
+      mailpit:
+        condition: service_started
+      seaweedfs:
+        condition: service_started
+    environment:
+      SPRING_KAFKA_BOOTSTRAPSERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: blastmail-redis
+      SPRING_DATA_REDIS_PORT: 6379        # container port; 6380 is only the host-side mapping
+      SPRING_MAIL_HOST: mailpit
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+    ports:
+      - "8084:8084"
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8084"]
+
+  wire-service:
+    build:
+      context: .
+      args:
+        SERVICE: wire-service
+    image: dsp/wire-service:local
+    container_name: dsp-wire-service
+    profiles: ["apps"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      seaweedfs:
+        condition: service_started
+      settlement-service:
+        condition: service_healthy
+      # Started after notification-service has created delivery-status (6 partitions, 7 days); otherwise
+      # wire-service's consumer makes the broker auto-create it with 1 partition (see "Running locally").
+      notification-service:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/wire_db
+      SPRING_KAFKA_BOOTSTRAPSERVERS: kafka:29092
+      SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_DSP_TOKENURI: http://keycloak:8080/realms/dsp/protocol/openid-connect/token
+      CLIENTS_SETTLEMENTSERVICE_BASEURL: http://settlement-service:8082
+      STORAGE_ENDPOINT: http://seaweedfs:8333
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
+      SECURITY_ALB_PUBLICKEY:
+    ports:
+      - "8083:8083"
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "bash", "-c", "</dev/tcp/localhost/8083"]
+
 volumes:
   mysql-data:
   mongo-data:
