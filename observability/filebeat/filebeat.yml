@@ -1,0 +1,35 @@
+# Filebeat for the "elk" compose profile: ships the services' ECS JSON log files into Elasticsearch.
+# The services already write one ECS JSON event per line (logging.structured.format.file: ecs), so
+# Filebeat parses nothing itself: the ndjson parser takes each line's fields as the event's fields.
+#
+# Where the files are (mounted read-only by docker-compose.yml):
+#   /logs/ide/                 services started from the IDE (working directory = repository root)
+#   /logs/<service>/           services started with `mvn -pl <service> spring-boot:run` (module directory)
+#   /logs/containers/          services started with the "apps" profile (shared app-logs volume)
+
+filebeat.inputs:
+  - type: filestream
+    id: dsp-service-logs
+    paths:
+      - /logs/**/*.json
+    # Read files that already exist from the start, so earlier runs are searchable too.
+    # Each file is read once: the read position is kept in the filebeat-data volume.
+    parsers:
+      - ndjson:
+          target: ""             # the line's fields become top-level fields (message, traceId, loanId, ...)
+          overwrite_keys: true   # the app's @timestamp, message and log.level win over Filebeat's own
+          expand_keys: true
+          add_error_key: true    # a line that is not JSON is kept, with error.message set
+
+processors:
+  # Filebeat's own metadata about itself and the container it runs in: noise for these searches.
+  - drop_fields:
+      fields: ["agent", "host", "input"]
+      ignore_missing: true
+
+# Default output: the filebeat-9.5.7 data stream, with Filebeat's index template (ECS mappings,
+# unknown string fields such as traceId and loanId mapped as keyword, so they can be matched exactly).
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+
+logging.level: info
