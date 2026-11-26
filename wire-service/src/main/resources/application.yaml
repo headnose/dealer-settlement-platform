@@ -1,6 +1,11 @@
 spring:
   application:
     name: wire-service
+    # O3 (LG4): restore registered ThreadLocals (trace + our MDC keys, MdcPropagationConfig) on every thread a
+    # Reactor chain runs on: the WebClient call to settlement-service hops to boundedElastic (token fetch) and
+    # Reactor Netty threads. Boot's default "limited" restores them only in a few operators (handle/tap).
+  reactor:
+    context-propagation: auto
   datasource:
     url: jdbc:mysql://localhost:3306/wire_db
     username: dsp
