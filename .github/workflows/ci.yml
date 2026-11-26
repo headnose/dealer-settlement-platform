@@ -26,3 +26,29 @@ jobs:
 
       - name: Build and test all modules
         run: mvn -B clean verify
+  # Builds one image per service from the root Dockerfile, to prove the images build. Nothing is pushed
+  # (no registry yet). Runs next to the Maven job: the image build skips tests, the build job runs them.
+  docker:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false            # one broken image still shows the other three results
+      matrix:
+        service: [loan-service, settlement-service, wire-service, notification-service]
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: SERVICE=${{ matrix.service }}
+          tags: dsp/${{ matrix.service }}:ci
+          push: false
+          # Layer cache in GitHub Actions' cache, one scope per service so they do not overwrite each other
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

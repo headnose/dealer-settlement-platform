@@ -84,6 +84,38 @@ Sent emails can be read at http://localhost:8025 (Mailpit). The compose SeaweedF
 `wire-statements` bucket itself on startup; it has no volume, so `docker compose down` empties it
 (`stop` / `start` keep the data).
 
+### Run the services in Docker (optional)
+
+Instead of the IDE, the four services can run as containers, built from the root `Dockerfile`
+(one Dockerfile for every module, chosen with the `SERVICE` build argument):
+
+```bash
+docker compose --profile apps up -d --build      # infrastructure + the four services
+docker compose --profile apps ps                 # all four should become "healthy"
+docker compose --profile apps logs -f wire-service
+docker compose --profile apps down               # stop everything again
+```
+
+- They use the same host ports as the IDE (8081-8084), so stop any service running from the IDE
+  first. The curl commands below work unchanged.
+- Each service's `localhost` addresses are replaced with the compose service names through
+  environment variables (for example `CLIENTS_LOANSERVICE_BASEURL=http://loan-service:8081`).
+- Start order is handled by `depends_on`: wire-service starts only after notification-service is up,
+  so `delivery-status` is created with 6 partitions (see above). Kafka got a healthcheck for this.
+- `SECURITY_ALB_PUBLICKEY` is passed through from your shell. Export it before `up` to use your own
+  dev key pair: `export SECURITY_ALB_PUBLICKEY="$(cat .local-keys/alb-dev-public.pem)"`.
+- Inside Docker, wire-service gets its token from `keycloak:8080`, so settlement-service checks that
+  issuer instead of `localhost:8180`.
+- Prometheus still scrapes `host.docker.internal:8082-8084`, which reaches the containers through
+  their published ports.
+
+To build one image by hand: `docker build --build-arg SERVICE=wire-service -t dsp/wire-service:local .`
+
+The image is a multi-stage build: Maven builds the jar (tests skipped, CI runs them), Spring Boot
+splits it into layers so a code change only rebuilds the small last layer, and the runtime stage is
+`eclipse-temurin:17-jre` running as a non-root user. CI builds all four images on every pull request
+(`docker` job in `.github/workflows/ci.yml`) but does not push them anywhere yet.
+
 ### Try it
 
 settlement-service and wire-service answer `401` without a user token. Locally there is no load
@@ -2143,7 +2175,7 @@ alone would add a second source of truth next to the Problem Details `title`. No
 - [x] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka
 - [x] Observability, part 3: structured JSON logs with trace IDs and business fields
 - [ ] Optional: ELK compose profile (Elasticsearch, Kibana, Filebeat reading `logs/*.json`)
-- [ ] Dockerfiles and building the images in CI (next)
+- [x] Dockerfiles and building the images in CI (build only; no registry yet)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
 - [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
@@ -2267,6 +2299,9 @@ alone would add a second source of truth next to the Problem Details `title`. No
   each developer generates a pair and passes the public key at startup (see [Try it](#try-it))
 - The Keycloak client secret and admin password have local-only defaults (`wire-service-local-secret`,
   admin / admin); in AWS they would come from Secrets Manager or environment variables
+- CI builds the container images but does not push them to a registry (the blueprint pushes to ECR)
+- The container healthchecks only check that the port is open, not `/actuator/health`: the JRE image
+  has no curl
 - Prometheus and Grafana have no volumes: `docker compose down` deletes the collected metrics; Grafana
   admin / admin is local only; dashboard changes must be made in the JSON file, not in the UI
 - Percentiles on the dashboard are estimates within a histogram bucket, not exact values
