@@ -247,6 +247,22 @@ without reaching the server, while ten 404s leave it closed; `LoanImportServiceT
 outcomes above; `LoanServiceClientFallbackTest` checks that the three fallback methods stay
 `public` (why: [a race in Resilience4j](#fallback-race-in-resilience4j)).
 
+**State-change logging.** Each service logs one line when a breaker changes state (opening is WARN,
+the rest INFO). It is logged on the thread that caused the change, so it carries that request's trace
+ID. A real run (services in Docker, loan-service stopped, 8 loans imported, loan-service started again,
+2 more loans imported 20 s later):
+
+```
+19:13:06.836Z  WARN [loan-import-4] [7adb621b3924baf771ba2da35500f748-570653cfa5002f73] CircuitBreakerStateLogger : Circuit breaker loanService CLOSED -> OPEN: calls are rejected without being made
+19:14:22.338Z  INFO [loan-import-4] [42a9cd2bf5dca0205c9167b18c3bfa87-665f6bf71a9759fd] CircuitBreakerStateLogger : Circuit breaker loanService OPEN -> HALF_OPEN
+19:14:22.416Z  INFO [loan-import-4] [42a9cd2bf5dca0205c9167b18c3bfa87-665f6bf71a9759fd] CircuitBreakerStateLogger : Circuit breaker loanService HALF_OPEN -> CLOSED
+```
+
+All 8 loans came back `LOAN_SERVICE_UNAVAILABLE` and the breaker logged one line, not one per loan; the
+2 later loans were `IMPORTED`. While the breaker is open, the rejected calls log at DEBUG only (they
+used to log one WARN per loan in settlement-service, and one WARN with a stack trace per request in
+wire-service).
+
 ### Calculate a settlement
 
 `PATCH /api/v1/loans/{loanId}/settlements` calculates (or recalculates) the settlement for an
@@ -2172,7 +2188,8 @@ alone would add a second source of truth next to the Problem Details `title`. No
       (cancelling would not stop a running task), so no orphaned imports run
 - [x] Spring Security: ALB user authentication, roles and maker-checker, OAuth2 client credentials
       between wire-service and settlement-service
-- [ ] Logging: one line per breaker state change instead of one WARN per loan while it is open
+- [x] Logging: one line per breaker state change instead of one WARN per loan while it is open
+      (`CircuitBreakerStateLogger` in settlement-service and wire-service)
 - [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
 - [x] Observability, part 1: metrics (Prometheus, Grafana, dashboard)
@@ -2196,8 +2213,6 @@ alone would add a second source of truth next to the Problem Details `title`. No
   recovered, and have to be imported again (all breaker settings are starting values to tune)
 - Each instance has its own circuit breaker state (settlement-service and wire-service alike); with
   several instances, each one has to see the failures itself before it opens
-- Circuit breaker state changes are not logged in either service; the state is only visible in
-  Actuator metrics (`resilience4j.circuitbreaker.state`)
 - settlement-service's Actuator also runs on the API port and shares its request threads (same as
   wire-service)
 - When the import pool is full (10 threads + 50 queued), loans get `IMPORT_CAPACITY_EXCEEDED` and
@@ -2208,8 +2223,7 @@ alone would add a second source of truth next to the Problem Details `title`. No
   so under a slow loan-service most of the "max 10" capacity arrives late
 - The loan-service breaker learns only from finished calls: when loan-service becomes slow or
   unresponsive, the first wave still waits (4-5 s) and the first few requests can still get `500`s
-- While the loan-service breaker is open, every loan logs one WARN line (about 12 per second at
-  2 imports/s); a request rejected by the full import pool logs one WARN line with counts
+- A request rejected by the full import pool logs one WARN line with counts
 - The loan-service fallback methods must stay `public` to avoid a race in Resilience4j 2.4.0's
   handling of non-public fallbacks (a test guards it)
 - The cache holds the whole settlement detail, not only loan metadata as the blueprint says,
