@@ -18,6 +18,13 @@ spring:
         request.timeout.ms: 5000
         delivery.timeout.ms: 10000
         spring.json.add.type.headers: false
+    # O2 (G2): Spring Kafka observations (off by default). Listener: one span per received email-delivery record,
+    # continuing PWT's trace from the traceparent header. Producer: one span per delivery-status send.
+    # Only Boot's KafkaTemplate and listener factory; the hand-built DLQ template is not observed.
+    template:
+      observation-enabled: true
+    listener:
+      observation-enabled: true
   data:
     redis:
       host: localhost
