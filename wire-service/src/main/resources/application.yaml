@@ -82,6 +82,7 @@ clients:
 topics:
   partitions: 6
   replication-factor: 1   # blueprint: >= 3 in production; a single local broker only supports 1
+  min-insync-replicas: 1  # 1 locally (one broker); production 2 with replication factor 3
 
 # B4: circuit breaker on the settlement-service call (same starting values as settlement-service's
 # loanService breaker, L3). Only "settlement-service unavailable" counts as a failure (timeout, connection

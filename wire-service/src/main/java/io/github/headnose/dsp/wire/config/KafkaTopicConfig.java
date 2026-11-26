@@ -19,11 +19,14 @@ public class KafkaTopicConfig {
 
     private final int partitions;
     private final int replicationFactor;
+    private final int minInsyncReplicas;
 
     public KafkaTopicConfig(@Value("${topics.partitions}") int partitions,
-                            @Value("${topics.replication-factor}") int replicationFactor) {
+                            @Value("${topics.replication-factor}") int replicationFactor,
+                            @Value("${topics.min-insync-replicas}") int minInsyncReplicas) {
         this.partitions = partitions;
         this.replicationFactor = replicationFactor;
+        this.minInsyncReplicas = minInsyncReplicas;
     }
 
     @Bean
@@ -43,6 +46,9 @@ public class KafkaTopicConfig {
                 .partitions(partitions)
                 .replicas(replicationFactor)
                 .config(TopicConfig.RETENTION_MS_CONFIG, String.valueOf(retention.toMillis()))
+                // acks=all only waits for the replicas currently in sync. With min ISR 2 (of 3), a write
+                // is acknowledged only once 2 copies have it; with fewer in sync the producer gets an error.
+                .config(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, String.valueOf(minInsyncReplicas))
                 .build();
     }
 }

@@ -61,6 +61,7 @@ management:
 topics:
   partitions: 6
   replication-factor: 1                  # 1 locally, blueprint >= 3
+  min-insync-replicas: 1  # 1 locally (one broker); production 2 with replication factor 3
 
 blastmail:
   from: blastmail@example.com
