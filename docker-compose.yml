@@ -319,6 +319,8 @@ services:
       SPRING_DATA_REDIS_HOST: blastmail-redis
       SPRING_DATA_REDIS_PORT: 6379        # container port; 6380 is only the host-side mapping
       SPRING_MAIL_HOST: mailpit
+      # DLQ redrive delay (dlq-redrive.delay); shorten it to watch a redrive: DLQ_REDRIVE_DELAY=30s docker compose ...
+      DLQREDRIVE_DELAY: ${DLQ_REDRIVE_DELAY:-5m}
       STORAGE_ENDPOINT: http://seaweedfs:8333
       MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     ports:
@@ -357,6 +359,8 @@ services:
       SPRING_KAFKA_BOOTSTRAPSERVERS: kafka:29092
       SPRING_SECURITY_OAUTH2_CLIENT_PROVIDER_DSP_TOKENURI: http://keycloak:8080/realms/dsp/protocol/openid-connect/token
       CLIENTS_SETTLEMENTSERVICE_BASEURL: http://settlement-service:8082
+      # DLQ redrive delay (dlq-redrive.delay); shorten it to watch a redrive: DLQ_REDRIVE_DELAY=30s docker compose ...
+      DLQREDRIVE_DELAY: ${DLQ_REDRIVE_DELAY:-5m}
       STORAGE_ENDPOINT: http://seaweedfs:8333
       MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
       SECURITY_ALB_PUBLICKEY:
