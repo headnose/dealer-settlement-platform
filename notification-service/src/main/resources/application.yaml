@@ -79,3 +79,14 @@ storage:
   path-style-access: true                # localhost:8333/wire-statements/key (no per-bucket DNS locally)
   api-call-attempt-timeout: 2s           # one HTTP attempt
   api-call-timeout: 5s                   # whole call incl. SDK retries (starting values, check in load test)
+
+# O3 (LG1): people read the console (plain text, unchanged); machines read this file (ECS JSON, one event
+# per line, the field names Elasticsearch/Kibana expect). In AWS the container sets
+# LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs instead, because ECS/Fargate collects stdout.
+# Relative path: lands under the directory the app was started from (git-ignored).
+logging:
+  file:
+    name: logs/${spring.application.name}.json
+  structured:
+    format:
+      file: ecs
