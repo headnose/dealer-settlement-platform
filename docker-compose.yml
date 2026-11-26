@@ -248,7 +248,7 @@ services:
     container_name: dsp-ui
     profiles: ["ui"]
     volumes:
-      - ./ui/index.html:/usr/share/nginx/html/index.html:ro
+      - ./ui:/usr/share/nginx/html:ro      # the folder, not the file: an edited or replaced file shows up at once
       - ./ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"   # the services' published ports on the host
