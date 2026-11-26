@@ -108,6 +108,12 @@ public class SettlementServiceClient {
                 // B3: open breaker = settlement-service unavailable -> the existing 502 (API unchanged, D3).
                 .onErrorMap(CallNotPermittedException.class, e -> new SettlementServiceUnavailableException(
                         "settlement-service circuit breaker is open; not called for loan " + loanId, e))
+                // O3 (LG4): copy the request thread's registered ThreadLocals (trace + our MDC keys userId/loanId,
+                // MdcPropagationConfig) into the Reactor Context at subscription. With
+                // spring.reactor.context-propagation=auto every operator above then restores them on its thread
+                // (boundedElastic token fetch, Reactor Netty response). Without it only the trace arrived (WebClient
+                // writes its own observation into the Context). Must be the last operator: toFuture() subscribes.
+                .contextCapture()
                 .toFuture();
     }
 
