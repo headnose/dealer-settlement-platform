@@ -65,6 +65,7 @@ mvn clean install             # build all modules and run tests
 | `prometheus` | 9090 | scrapes the services' metrics (profile `observability`, not started by `up -d`; see [Observability](#observability-part-1-metrics-prometheus--grafana)) |
 | `grafana` | 3000 (admin / admin, local only) | the DSP Overview dashboard (profile `observability`) |
 | `jaeger` | 16686 (UI), 4318 (OTLP over HTTP) | receives and shows the services' traces (profile `observability`; see [Tracing](#observability-part-2-tracing-opentelemetry--jaeger)) |
+| `ui` | 8090 | basic UI for the settlement flow (profile `ui`, not started by `up -d`; see [Basic UI](#basic-ui-optional)) |
 | `elasticsearch` | 9200 | stores the services' log events (profile `elk`, not started by `up -d`; see [Centralized logs](#observability-part-4-centralized-logs-elk)) |
 | `kibana` | 5601 | searches the log events (profile `elk`) |
 | `filebeat` | none | reads the services' `logs/*.json` files and ships them to Elasticsearch (profile `elk`) |
@@ -118,6 +119,30 @@ The image is a multi-stage build: Maven builds the jar (tests skipped, CI runs t
 splits it into layers so a code change only rebuilds the small last layer, and the runtime stage is
 `eclipse-temurin:17-jre` running as a non-root user. CI builds all four images on every pull request
 (`docker` job in `.github/workflows/ci.yml`) but does not push them anywhere yet.
+
+### Basic UI (optional)
+
+A single page for practicing the flow by hand, without curl: [`ui/index.html`](ui/index.html), plain HTML and
+JavaScript, no build step. nginx serves it on http://localhost:8090 and proxies the API calls (`/loan`, `/lsc`,
+`/pwt` to ports 8081-8083), so the browser talks to one origin and the services need no CORS settings, the same
+idea as the ALB routing by path. It works with the services in the `apps` profile or started from the IDE.
+
+```bash
+docker compose --profile ui up -d ui
+```
+
+- **Who you are:** paste the two tokens from `dev-tools/AlbDevToken.java` (FinanceOps, SettlementAdmin); the
+  page remembers them in this browser. Locally there is no ALB, so the page sends the header it would add.
+- **1. Loans:** look a loan up in loan-service, import one or more, see each loan's outcome.
+- **2. Settlement:** edit the adjustment rows; the page shows the expected net (principal minus adjustments)
+  before you calculate, and says whether the answer matches. "Show detail" adds the value date and the
+  beneficiary bank.
+- **3. Wire:** generate a wire as FinanceOps (4 recipients), send it as SettlementAdmin.
+- **Calls:** every request with its status and raw JSON answer, errors included (try a 3-decimal amount, an
+  `ACTIVE` loan, sending twice, or sending with the FinanceOps token).
+
+It cannot show delivery status yet: wire-service has no endpoint to read a submission (see Known limitations).
+A real frontend (React, login through Keycloak instead of pasted tokens) is on the roadmap.
 
 ### Try it
 
@@ -2404,6 +2429,8 @@ On the first start Filebeat also read the older files from earlier runs (220 wir
 - [x] Dockerfiles and building the images in CI (build only; no registry yet)
 - [x] Automated retry job for the dead-letter topics (`DeadLetterRedriveJob`: delayed redrive of
       retryable failures, max 3 rounds, then parked)
+- [x] Basic UI: one page (`ui/index.html`) behind nginx, profile `ui`
+- [ ] Real frontend: React, login through Keycloak, a delivery-status view (needs a read endpoint in wire-service)
 - [ ] Maybe: a short-lived AWS demo deployment
 - [x] Small: more CLOSED sample loans: 200 demo loans `LN-5001` to `LN-5200` (every end-to-end run
       uses one up, because each loan can be sent only once)

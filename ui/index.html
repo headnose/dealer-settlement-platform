@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSP - Settlement desk (basic UI)</title>
+<style>
+  :root {
+    color-scheme: dark;   /* dark scrollbars, checkboxes and form controls */
+    --bg: #0f1115; --panel: #171a21; --ink: #e6e9ef; --muted: #9aa3b2; --line: #2a2f3a;
+    --accent: #5b8cff; --accent-ink: #0b1020; --field: #0f1218;
+    --ok: #4cc38a; --warn: #f0b354; --err: #ff6b6b; --code: #11141a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         color: var(--ink); background: var(--bg); }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 16px; padding: 16px 24px; }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px;
+            margin-bottom: 16px; }
+  section h2 { margin: 0 0 4px; font-size: 15px; }
+  section .hint { margin: 0 0 12px; color: var(--muted); }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select, textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+                            background: var(--field); color: var(--ink); }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { width: 100%; font-family: ui-monospace, Menlo, monospace; font-size: 11px; height: 54px; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--accent);
+           background: var(--accent); color: var(--accent-ink); font-weight: 600; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button.link { border: none; background: none; color: var(--accent); padding: 0 4px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; margin-bottom: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .kv { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; margin-top: 8px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; font-weight: 600;
+           background: var(--code); border: 1px solid var(--line); }
+  .badge.ok { color: var(--ok); } .badge.warn { color: var(--warn); } .badge.err { color: var(--err); }
+  .check { margin-top: 8px; padding: 8px; border-radius: 6px; background: var(--code); border: 1px solid var(--line); }
+  a { color: var(--accent); }
+  code { background: var(--code); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .check.ok { color: var(--ok); } .check.err { color: var(--err); }
+  #log { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  #log .entry { border-bottom: 1px solid var(--line); padding: 8px 0; }
+  #log .head { display: flex; gap: 8px; align-items: center; }
+  #log pre { margin: 6px 0 0; padding: 8px; background: var(--code); border-radius: 6px; white-space: pre-wrap;
+             word-break: break-word; max-height: 260px; overflow: auto; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Settlement desk <span class="muted">(basic UI, local practice)</span></h1>
+  <p>Import closed loans, calculate settlements, generate and send wires. Every call and its raw answer is shown on
+     the right.</p>
+</header>
+
+<main>
+<div>
+  <!-- Tokens -->
+  <section>
+    <h2>Who you are</h2>
+    <p class="hint">Locally there is no ALB, so paste the signed header it would send. From the repository root
+      (valid 60 min): <code>java dev-tools/AlbDevToken.java dev-finops FinanceOps 60</code> and
+      <code>java dev-tools/AlbDevToken.java dev-admin SettlementAdmin 60</code>.</p>
+    <div class="grid2">
+      <div><label for="finops">FinanceOps token (import, calculate, generate)</label>
+        <textarea id="finops" placeholder="paste FinanceOps token"></textarea></div>
+      <div><label for="admin">SettlementAdmin token (send)</label>
+        <textarea id="admin" placeholder="paste SettlementAdmin token"></textarea></div>
+    </div>
+  </section>
+
+  <!-- 1. Loans -->
+  <section>
+    <h2>1. Loans</h2>
+    <p class="hint">Look a loan up in loan-service, then import one or more into settlement-service. Demo loans
+      LN-5001 to LN-5200 are all CLOSED; each loan can be sent only once.</p>
+    <div class="row">
+      <div><label for="loanIds">Loan IDs (comma-separated)</label>
+        <input id="loanIds" size="40" value="LN-5010"></div>
+      <button class="secondary" id="btnLookup">Look up first</button>
+      <button id="btnImport">Import</button>
+    </div>
+    <div id="loanPreview"></div>
+    <div id="importResults"></div>
+  </section>
+
+  <!-- 2. Settlement -->
+  <section>
+    <h2>2. Settlement</h2>
+    <p class="hint">Gross comes from the imported principal. Add adjustments, predict the net, then calculate.</p>
+    <div class="row">
+      <div><label for="settleLoan">Loan ID</label><input id="settleLoan" size="14" value="LN-5010"></div>
+      <div><label for="currency">Currency</label>
+        <input id="currency" size="5" value="USD"></div>
+      <button class="secondary" id="btnLoadPrincipal">Load principal</button>
+    </div>
+    <table>
+      <thead><tr><th>Adjustment type</th><th class="num">Amount</th><th></th></tr></thead>
+      <tbody id="adjRows"></tbody>
+    </table>
+    <div class="row" style="margin-top:8px">
+      <button class="secondary" id="btnAddAdj">+ Add adjustment</button>
+    </div>
+    <div id="prediction" class="check">Load the principal to see the expected net.</div>
+    <div class="row" style="margin-top:12px">
+      <button id="btnCalculate">Calculate</button>
+      <button class="secondary" id="btnDetail">Show detail</button>
+    </div>
+    <div id="settlementResult"></div>
+  </section>
+
+  <!-- 3. Wire -->
+  <section>
+    <h2>3. Wire</h2>
+    <p class="hint">Generate a DRAFT wire as FinanceOps, then send it as SettlementAdmin (maker-checker).
+      Emails arrive in Mailpit: <a href="http://localhost:8025" target="_blank">localhost:8025</a>.</p>
+    <div class="row">
+      <div><label for="wireLoan">Loan ID</label><input id="wireLoan" size="14" value="LN-5010"></div>
+      <button id="btnGenerate">Generate wire</button>
+    </div>
+    <div class="row">
+      <div><label for="submissionId">Submission ID</label><input id="submissionId" size="44"></div>
+      <button id="btnSend">Send (admin)</button>
+    </div>
+    <div id="wireResult"></div>
+  </section>
+</div>
+
+<!-- Call log -->
+<div>
+  <section>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <h2>Calls</h2><button class="link" id="btnClear">clear</button>
+    </div>
+    <p class="hint">Method, path, status and the raw JSON answer, newest first. Errors are RFC 9457 problem
+      details from the services.</p>
+    <div id="log"></div>
+  </section>
+</div>
+</main>
+
+<script>
+const ADJUSTMENT_TYPES = ['DEALER_HOLDBACK', 'DOC_FEE', 'TITLE_FEE', 'DISPUTED_ITEM'];
+const $ = (id) => document.getElementById(id);
+let principal = null;
+
+// --- tokens: remembered in this browser only (best effort; works without storage too)
+function remember(id) {
+  const el = $(id);
+  try { el.value = localStorage.getItem('dsp-' + id) || ''; } catch (e) { /* storage unavailable */ }
+  el.addEventListener('input', () => { try { localStorage.setItem('dsp-' + id, el.value.trim()); } catch (e) {} });
+}
+remember('finops');
+remember('admin');
+
+// --- HTTP: every call goes through nginx (/loan, /lsc, /pwt) and is shown in the log
+async function call(method, path, { token, body } = {}) {
+  const headers = {};
+  if (token) headers['x-amzn-oidc-data'] = $(token).value.trim();
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  const started = performance.now();
+  let status = 0, data = null, text = '';
+  try {
+    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    status = res.status;
+    text = await res.text();
+    try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  } catch (e) {
+    text = String(e);
+  }
+  logCall(method, path, status, data ?? text, Math.round(performance.now() - started));
+  return { status, data };
+}
+
+function logCall(method, path, status, payload, ms) {
+  const kind = status >= 200 && status < 300 ? 'ok' : status >= 400 && status < 500 ? 'warn' : 'err';
+  const entry = document.createElement('div');
+  entry.className = 'entry';
+  entry.innerHTML = `<div class="head"><span class="badge ${kind}">${status || 'no answer'}</span>
+    <strong>${method}</strong><span>${escapeHtml(path)}</span><span class="muted">${ms} ms</span></div>`;
+  const pre = document.createElement('pre');
+  pre.textContent = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+  entry.appendChild(pre);
+  $('log').prepend(entry);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+const money = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const problem = (data) => data && data.title ? `${data.title}: ${data.detail || ''}` : 'see the call log';
+
+function loanIds() {
+  return $('loanIds').value.split(',').map((s) => s.trim()).filter(Boolean);
+}
+function useLoan(id) {
+  $('settleLoan').value = id;
+  $('wireLoan').value = id;
+}
+
+// --- 1. Loans
+$('btnLookup').onclick = async () => {
+  const id = loanIds()[0];
+  if (!id) return;
+  const { status, data } = await call('GET', `/loan/api/v1/loans/${encodeURIComponent(id)}`);
+  if (status !== 200) {
+    $('loanPreview').innerHTML = `<div class="check err">${status === 404 ? 'No such loan in loan-service.' : problem(data)}</div>`;
+    return;
+  }
+  $('loanPreview').innerHTML = `<div class="kv">
+    <div>Loan</div><div>${escapeHtml(data.loanId)} <span class="badge ${data.status === 'CLOSED' ? 'ok' : 'warn'}">${data.status}</span></div>
+    <div>Dealer</div><div>${escapeHtml(data.dealer.dealerName)} (${escapeHtml(data.dealer.dealerBankName)})</div>
+    <div>Principal</div><div>${money(data.principalAmount)} ${data.currency}</div>
+    <div>Closing date</div><div>${data.closingDate}</div></div>`;
+};
+
+$('btnImport').onclick = async () => {
+  const ids = loanIds();
+  if (!ids.length) return;
+  const { status, data } = await call('POST', '/lsc/api/v1/imports', { token: 'finops', body: { loanIds: ids } });
+  if (status !== 200) {
+    $('importResults').innerHTML = `<div class="check err">${status} ${problem(data)}</div>`;
+    return;
+  }
+  const good = ['IMPORTED', 'ALREADY_IMPORTED'];
+  $('importResults').innerHTML = `<table><thead><tr><th>Loan</th><th>Outcome</th><th>Message</th><th></th></tr></thead><tbody>
+    ${data.map((r) => `<tr><td>${escapeHtml(r.loanId)}</td>
+      <td><span class="badge ${good.includes(r.outcome) ? 'ok' : 'warn'}">${r.outcome}</span></td>
+      <td>${escapeHtml(r.message)}</td>
+      <td>${good.includes(r.outcome) ? `<button class="link" data-use="${escapeHtml(r.loanId)}">use below</button>` : ''}</td></tr>`).join('')}
+    </tbody></table>`;
+  $('importResults').querySelectorAll('[data-use]').forEach((b) => { b.onclick = () => useLoan(b.dataset.use); });
+};
+
+// --- 2. Settlement
+function addAdjustment(type = 'DOC_FEE', amount = '') {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `<td><select>${ADJUSTMENT_TYPES.map((t) => `<option ${t === type ? 'selected' : ''}>${t}</option>`).join('')}</select></td>
+    <td class="num"><input type="text" inputmode="decimal" size="12" value="${amount}" style="text-align:right"></td>
+    <td><button class="link">remove</button></td>`;
+  tr.querySelector('button').onclick = () => { tr.remove(); updatePrediction(); };
+  tr.querySelector('input').oninput = updatePrediction;
+  $('adjRows').appendChild(tr);
+  updatePrediction();
+}
+function adjustments() {
+  return [...$('adjRows').querySelectorAll('tr')].map((tr) => ({
+    adjustmentType: tr.querySelector('select').value,
+    amount: tr.querySelector('input').value.trim(),
+  })).filter((a) => a.amount !== '');
+}
+function updatePrediction() {
+  if (principal === null) return;
+  const total = adjustments().reduce((sum, a) => sum + Number(a.amount || 0), 0);
+  $('prediction').className = 'check';
+  $('prediction').textContent = `Expected: gross ${money(principal)} - adjustments ${money(total)} = net ${money(principal - total)}`;
+}
+$('btnAddAdj').onclick = () => addAdjustment();
+addAdjustment('DEALER_HOLDBACK', '500.00');
+addAdjustment('DOC_FEE', '150.00');
+
+$('btnLoadPrincipal').onclick = async () => {
+  const id = $('settleLoan').value.trim();
+  const { status, data } = await call('GET', `/loan/api/v1/loans/${encodeURIComponent(id)}`);
+  if (status === 200) {
+    principal = Number(data.principalAmount);
+    updatePrediction();
+  }
+};
+
+$('btnCalculate').onclick = async () => {
+  const id = $('settleLoan').value.trim();
+  // Amounts are sent as JSON numbers, exactly as typed (10.505 stays 10.505, so validation can reject it)
+  const body = {
+    payment: { paymentMethod: 'WIRE', currency: $('currency').value.trim() },
+    adjustments: adjustments().map((a) => ({ adjustmentType: a.adjustmentType, amount: Number(a.amount) })),
+  };
+  const { status, data } = await call('PATCH', `/lsc/api/v1/loans/${encodeURIComponent(id)}/settlements`,
+    { token: 'finops', body });
+  if (status !== 200) {
+    $('settlementResult').innerHTML = `<div class="check err">${status} ${problem(data)}</div>`;
+    return;
+  }
+  let check = '';
+  if (principal !== null) {
+    const expected = principal - adjustments().reduce((s, a) => s + Number(a.amount), 0);
+    const match = money(expected) === money(data.netSettlement);
+    check = `<div class="check ${match ? 'ok' : 'err'}">${match ? 'Matches your prediction.' : `Prediction was ${money(expected)}.`}</div>`;
+  }
+  $('settlementResult').innerHTML = `<div class="kv">
+    <div>Settlement</div><div>${escapeHtml(data.settlementId)} <span class="badge ok">${data.status}</span></div>
+    <div>Gross</div><div>${money(data.grossAmount)}</div>
+    <div>Total adjustment</div><div>${money(data.totalAdjustment)}</div>
+    <div>Net settlement</div><div><strong>${money(data.netSettlement)}</strong></div></div>${check}`;
+};
+
+$('btnDetail').onclick = async () => {
+  const id = $('settleLoan').value.trim();
+  const { status, data } = await call('GET', `/lsc/api/v1/loans/${encodeURIComponent(id)}/settlements`, { token: 'finops' });
+  if (status !== 200) {
+    $('settlementResult').innerHTML = `<div class="check err">${status} ${problem(data)}</div>`;
+    return;
+  }
+  $('settlementResult').innerHTML = `<div class="kv">
+    <div>Loan</div><div>${escapeHtml(data.loan.loanId)}, ${escapeHtml(data.loan.dealer.dealerName)}</div>
+    <div>Net settlement</div><div><strong>${money(data.settlement.netSettlement)}</strong> ${data.payment.currency}</div>
+    <div>Value date</div><div>${data.payment.valueDate} <span class="muted">(next business day)</span></div>
+    <div>Beneficiary bank</div><div>${escapeHtml(data.payment.beneficiaryBank)}</div>
+    <div>Adjustments</div><div>${data.adjustments.map((a) => `${a.adjustmentType} ${money(a.amount)}`).join(', ') || 'none'}</div></div>`;
+};
+
+// --- 3. Wire
+$('btnGenerate').onclick = async () => {
+  const id = $('wireLoan').value.trim();
+  const { status, data } = await call('POST', '/pwt/api/v1/wires',
+    { token: 'finops', body: { loanId: id, wireType: 'SETTLEMENT' } });
+  if (status !== 201) {
+    $('wireResult').innerHTML = `<div class="check err">${status} ${problem(data)}</div>`;
+    return;
+  }
+  $('submissionId').value = data.submissionId;
+  $('wireResult').innerHTML = `<div class="kv"><div>Submission</div><div>${escapeHtml(data.submissionId)}
+    <span class="badge">${data.status}</span></div><div>Created</div><div>${data.createdTime}</div></div>
+    <table><thead><tr><th>Recipient</th><th>Name</th><th>Email</th></tr></thead><tbody>
+    ${data.notificationRecipients.map((r) => `<tr><td>${r.recipientType}</td><td>${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(r.email)}</td></tr>`).join('')}</tbody></table>`;
+};
+
+$('btnSend').onclick = async () => {
+  const id = $('submissionId').value.trim();
+  if (!id) return;
+  const { status, data } = await call('POST', `/pwt/api/v1/wires/${encodeURIComponent(id)}/send`, { token: 'admin' });
+  $('wireResult').insertAdjacentHTML('beforeend', status === 202
+    ? `<div class="check ok">Sent: ${data.status}. The 4 emails go out asynchronously (Kafka, then BlastMail).</div>`
+    : `<div class="check err">${status} ${problem(data)}</div>`);
+};
+
+$('btnClear').onclick = () => { $('log').innerHTML = ''; };
+</script>
+</body>
+</html>
