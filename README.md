@@ -65,6 +65,9 @@ mvn clean install             # build all modules and run tests
 | `prometheus` | 9090 | scrapes the services' metrics (profile `observability`, not started by `up -d`; see [Observability](#observability-part-1-metrics-prometheus--grafana)) |
 | `grafana` | 3000 (admin / admin, local only) | the DSP Overview dashboard (profile `observability`) |
 | `jaeger` | 16686 (UI), 4318 (OTLP over HTTP) | receives and shows the services' traces (profile `observability`; see [Tracing](#observability-part-2-tracing-opentelemetry--jaeger)) |
+| `elasticsearch` | 9200 | stores the services' log events (profile `elk`, not started by `up -d`; see [Centralized logs](#observability-part-4-centralized-logs-elk)) |
+| `kibana` | 5601 | searches the log events (profile `elk`) |
+| `filebeat` | none | reads the services' `logs/*.json` files and ships them to Elasticsearch (profile `elk`) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
@@ -1939,7 +1942,7 @@ bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
 The blueprint's "Centralized Logging": structured logs with `traceId`, `spanId`, `submissionId`,
 `loanId` and `userId` in every entry, so one search finds everything about a wire or a loan, plus
 the ELK stack to collect them. This part builds the log side in all three services; collecting the
-files into Elasticsearch/Kibana is not built yet (see Roadmap). Every output below is from my own
+files into Elasticsearch/Kibana is [part 4](#observability-part-4-centralized-logs-elk). Every output below is from my own
 runs on 2026-11-25/26 (services started with `mvn spring-boot:run`).
 
 ### What was built
@@ -2086,6 +2089,88 @@ alone would add a second source of truth next to the Problem Details `title`. No
   them with 4 lines each (package line and empty class); they were unstaged and added again with
   their content before the commit.
 
+## Observability, part 4: centralized logs (ELK)
+
+The other half of the blueprint's "Centralized Logging": collect every service's log file in one
+place and search it by `traceId`, `submissionId` or `loanId`. Part 3 made the services write ECS JSON
+files; this part ships those files into Elasticsearch and searches them in Kibana.
+
+### What was built
+
+- **Compose profile `elk`**: Elasticsearch, Kibana and Filebeat, all 9.5.7. Not started by a plain
+  `docker compose up -d`. Local only: one node, security off (no TLS, no passwords), 512 MB heap.
+- **Filebeat, not Logstash.** The blueprint names Logstash, but the files are already ECS JSON, so
+  there is nothing to parse or reshape: Filebeat's `ndjson` parser turns each line's fields into the
+  event's fields (`observability/filebeat/filebeat.yml`). Logstash would add a JVM and a pipeline that
+  does nothing. In AWS the services would log to stdout (`LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs`, see
+  part 3) and the platform would collect it; no Filebeat in the app containers.
+- **Every way of running the services is covered.** Filebeat reads, read-only:
+
+| Started with | Log file | Mounted at |
+|---|---|---|
+| the IDE (working directory = repository root) | `logs/<service>.json` | `/logs/ide` |
+| `mvn -pl <service> spring-boot:run` | `<service>/logs/<service>.json` | `/logs/<service>` |
+| the `apps` profile | `app-logs` volume (`/app/logs` in each container) | `/logs/containers` |
+
+- **Read once.** Filebeat keeps its read position per file in the `filebeat-data` volume, so a restart
+  does not send the same lines again. Existing files are read from the start, so earlier runs are
+  searchable too.
+- Events go to Filebeat's default data stream (`filebeat-9.5.7`). Its index template maps unknown
+  string fields as `keyword`, so `traceId`, `loanId`, `submissionId` and `userId` can be matched exactly.
+
+### Try it
+
+```bash
+docker compose --profile elk up -d
+docker compose --profile elk ps
+```
+
+Wait until `dsp-elasticsearch` is healthy and Kibana answers on http://localhost:5601 (it takes a
+minute). Then create the data view once (Kibana keeps it in Elasticsearch, in the
+`elasticsearch-data` volume):
+
+```bash
+curl -X POST http://localhost:5601/api/data_views/data_view \
+  -H "kbn-xsrf: true" -H "Content-Type: application/json" \
+  -d '{"data_view": {"title": "filebeat-*", "name": "DSP logs", "timeFieldName": "@timestamp"}}'
+```
+
+Run a wire end to end (import, settle, generate, send) with a fresh demo loan, then in Kibana open
+**Discover**, pick **DSP logs**, and search with KQL:
+
+```
+submissionId : "SUB-…"
+traceId : "…"
+loanId : "LN-5001"
+service.name : "wire-service" and log.level : "WARN"
+```
+
+Add `service.name`, `log.level`, `loanId` and `message` as columns. One `submissionId` search should
+show the wire's lines from wire-service and from notification-service.
+
+New lines take up to about 20 seconds to arrive: Filebeat looks for new lines every 10 s and sends
+them in batches. A search right after a request can come back empty; search again.
+
+Check from the command line, counting one wire's lines per service:
+
+```bash
+curl -s "http://localhost:9200/filebeat-*/_search?size=0" -H "Content-Type: application/json" \
+  -d '{"query": {"term": {"submissionId": "SUB-…"}}, "aggs": {"by_service": {"terms": {"field": "service.name"}}}}'
+```
+
+A real run (services in the `apps` profile, loan `LN-5120` imported, settled, generated and sent):
+the first search, 10 s after the send, found 0 lines; a minute later the same search found 17, from
+two services, under one `submissionId`:
+
+| `service.name` | Lines |
+|---|---|
+| `notification-service` | 10 |
+| `wire-service` | 7 |
+
+The newest event was wire-service's `Wire submission status updated to SENT`, with `log.file.path`
+`/logs/containers/wire-service.json`: Filebeat keeps its own `log.file.path` next to the app's fields.
+On the first start Filebeat also read the older files from earlier runs (220 wire-service lines).
+
 ## What works so far
 
 - [x] Multi-module Maven project and Docker Compose infrastructure
@@ -2195,7 +2280,7 @@ alone would add a second source of truth next to the Problem Details `title`. No
 - [x] Observability, part 1: metrics (Prometheus, Grafana, dashboard)
 - [x] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka
 - [x] Observability, part 3: structured JSON logs with trace IDs and business fields
-- [ ] Optional: ELK compose profile (Elasticsearch, Kibana, Filebeat reading `logs/*.json`)
+- [x] Observability, part 4: ELK compose profile (Elasticsearch, Kibana, Filebeat reading `logs/*.json`)
 - [x] Dockerfiles and building the images in CI (build only; no registry yet)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
@@ -2320,6 +2405,12 @@ alone would add a second source of truth next to the Problem Details `title`. No
 - CI builds the container images but does not push them to a registry (the blueprint pushes to ECR)
 - The container healthchecks only check that the port is open, not `/actuator/health`: the JRE image
   has no curl
+- The ELK profile runs with security off (no TLS, no passwords) and one node: local only
+- Filebeat only reads the log file paths listed in `docker-compose.yml`; a service started from
+  another working directory writes its file somewhere Filebeat does not look
+- Elasticsearch keeps log events until its volume is deleted (no lifecycle policy). To start over, stop
+  the profile and remove only that volume: `docker volume rm dealer-settlement-platform_elasticsearch-data`
+  (not `down -v`, which also deletes the MySQL and MongoDB data)
 - Prometheus and Grafana have no volumes: `docker compose down` deletes the collected metrics; Grafana
   admin / admin is local only; dashboard changes must be made in the JSON file, not in the UI
 - Percentiles on the dashboard are estimates within a histogram bucket, not exact values
