@@ -16,5 +16,17 @@
     "listen": "0.0.0.0:18081",
     "upstream": "host.docker.internal:8081",
     "enabled": true
+  },
+  {
+    "name": "seaweedfs",
+    "listen": "0.0.0.0:18333",
+    "upstream": "seaweedfs:8333",
+    "enabled": true
+  },
+  {
+    "name": "kafka",
+    "listen": "0.0.0.0:19092",
+    "upstream": "kafka:29094",
+    "enabled": true
   }
 ]
