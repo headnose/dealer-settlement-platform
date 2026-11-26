@@ -47,6 +47,7 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+
 		<!-- Actuator: /actuator/health and /actuator/metrics (Hikari pool, server and repository
              timings for the load test). Exposure limited to health,metrics in application.yaml. -->
 		<dependency>
@@ -64,6 +65,13 @@
 		<dependency>
 			<groupId>io.micrometer</groupId>
 			<artifactId>micrometer-registry-prometheus</artifactId>
+		</dependency>
+
+		<!-- O2: distributed tracing. Boot 4's own OpenTelemetry starter: OpenTelemetry SDK + Micrometer
+     Tracing bridge + OTLP exporter (traces pushed to Jaeger). Version managed by Boot. -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-opentelemetry</artifactId>
 		</dependency>
 		<!-- Blueprint "Authentication and Authorization": own Spring Security setup (not shared with LSC). -->
 		<dependency>
@@ -129,6 +137,14 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+		<!-- O2: Boot 4 keeps the test default "no span export in @SpringBootTest" in this test starter.
+		     Without it, test contexts tried to send spans to localhost:4318 (seen in the build log). -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-opentelemetry-test</artifactId>
 			<scope>test</scope>
 		</dependency>
 

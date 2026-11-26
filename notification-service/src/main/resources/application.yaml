@@ -18,6 +18,13 @@ spring:
         request.timeout.ms: 5000
         delivery.timeout.ms: 10000
         spring.json.add.type.headers: false
+    # O2 (G2): Spring Kafka observations (off by default). Listener: one span per received email-delivery record,
+    # continuing PWT's trace from the traceparent header. Producer: one span per delivery-status send.
+    # Only Boot's KafkaTemplate and listener factory; the hand-built DLQ template is not observed.
+    template:
+      observation-enabled: true
+    listener:
+      observation-enabled: true
   data:
     redis:
       host: localhost
@@ -35,7 +42,22 @@ management:
     web:
       exposure:
         include: health,prometheus
-
+  # O2 (G4): trace every request/record locally (Boot default 0.1). Production would sample less.
+  tracing:
+    sampling:
+      probability: 1.0
+  # O2: export spans over OTLP/HTTP to the local Jaeger (no default endpoint in Boot 4.1).
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+  # O2: the OpenTelemetry starter also brings Micrometer's OTLP metrics registry (enabled by default,
+  # pushes to localhost:4318 = Jaeger). Metrics are already pulled by Prometheus: turn the push off.
+  otlp:
+    metrics:
+      export:
+        enabled: false
 topics:
   partitions: 6
   replication-factor: 1                  # 1 locally, blueprint >= 3

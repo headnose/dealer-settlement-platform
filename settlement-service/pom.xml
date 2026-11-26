@@ -75,6 +75,20 @@
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
 
+        <!-- G1: Boot's RestClient.Builder bean (with observations: http.client.requests metric, client span,
+     traceparent header) for the loan-service client. Boot 4: without this starter there is no builder bean. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+
+        <!-- O2: distributed tracing. Boot 4's own OpenTelemetry starter: OpenTelemetry SDK + Micrometer
+     Tracing bridge + OTLP exporter (traces pushed to Jaeger). Version managed by Boot. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
+        </dependency>
+
         <!-- Blueprint "Authentication and Authorization": ALB headers -> PreAuthenticatedAuthenticationToken,
      URL rules + @PreAuthorize. -->
         <dependency>
@@ -109,6 +123,14 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- O2: Boot 4 keeps the test default "no span export in @SpringBootTest" in this test starter.
+     Without it, test contexts tried to send spans to localhost:4318 (seen in the build log). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry-test</artifactId>
             <scope>test</scope>
         </dependency>
 

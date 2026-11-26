@@ -2,8 +2,9 @@
 
 A personal learning project: Java/Spring Boot microservices that model a dealer loan settlement
 and wire-notification workflow. Built to practice microservice design, concurrency, MongoDB/MySQL,
-Kafka, Redis, S3-compatible object storage, resilience patterns, and Spring Security (user
-authentication behind a load balancer, role-based access, service-to-service OAuth2 tokens).
+Kafka, Redis, S3-compatible object storage, resilience patterns, Spring Security (user
+authentication behind a load balancer, role-based access, service-to-service OAuth2 tokens), and
+observability (metrics and distributed tracing).
 
 **Status:** 🚧 In progress
 
@@ -38,7 +39,7 @@ settlement-service call. See [Authentication and authorization](#authentication-
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
 Spring Security (OAuth2 resource server and client) · Keycloak ·
 Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
-Spring Boot Actuator + Micrometer · Prometheus · Grafana · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
+Spring Boot Actuator + Micrometer · Prometheus · Grafana · OpenTelemetry · Jaeger · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
 GreenMail · k6 · Toxiproxy
 
 ## Running locally
@@ -63,6 +64,7 @@ mvn clean install             # build all modules and run tests
 | `toxiproxy` | 8474 (API), 13306, 18082, 18081 | load tests only (profile `load-test`, not started by `up -d`; see [Load test](#load-test-wire-generation) and [Import under load](#import-under-load-the-loan-service-call)) |
 | `prometheus` | 9090 | scrapes the services' metrics (profile `observability`, not started by `up -d`; see [Observability](#observability-part-1-metrics-prometheus--grafana)) |
 | `grafana` | 3000 (admin / admin, local only) | the DSP Overview dashboard (profile `observability`) |
+| `jaeger` | 16686 (UI), 4318 (OTLP over HTTP) | receives and shows the services' traces (profile `observability`; see [Tracing](#observability-part-2-tracing-opentelemetry--jaeger)) |
 
 Integration tests start their own throwaway containers with Testcontainers (MongoDB and Redis 7 for
 settlement-service; MySQL 8.4, Kafka 3.9.1 and SeaweedFS for wire-service; Kafka 3.9.1, Redis 7
@@ -1112,7 +1114,8 @@ and JDBC always blocks a thread; WebClient makes only HTTP calls non-blocking. S
 - Rejected alternatives: two `CompletableFuture` tasks on an executor (two blocked threads per
   request); caching the template (about 2 ms locally; the blueprint rejects it too).
 - The client is built from Boot's `WebClient.Builder` (it was the static `RestClient.builder()`
-  before), so the call is measured (`http.client.requests`) and can be traced later.
+  before), so the call is measured (`http.client.requests`) and traced (see
+  [Tracing](#observability-part-2-tracing-opentelemetry--jaeger)).
 
 ### P6: batch the INSERTs (beyond the blueprint)
 
@@ -1341,9 +1344,9 @@ when loan-service is slow. Every number comes from my own runs (2026-11-24, same
 - **settlement-service now has Actuator** (`health`, `metrics`, same rules as wire-service). Without
   any code, Boot instruments the `loanImportExecutor` bean (`executor.active`, `executor.queued`,
   `executor.pool.size`, `executor.completed`), Resilience4j registers the breaker metrics, and the
-  Tomcat metrics are on. The loan-service client is built without Boot's builder, so it has no
-  `http.client.requests`; the breaker's `resilience4j.circuitbreaker.calls` timer counts every call
-  that really went out, with its duration.
+  Tomcat metrics are on. At the time the loan-service client was built without Boot's builder, so it
+  had no `http.client.requests`; the breaker's `resilience4j.circuitbreaker.calls` timer counts every
+  call that really went out, with its duration. (Since tracing, part 2, it uses Boot's builder.)
 - **Mixed per-loan outcomes are expected.** The script counts statuses (`status_200`, `status_500`) and
   per-loan outcomes (`outcome_not_found`, …), splits latency by status, and fails on a malformed `200`
   body or dropped iterations. Runs I1-I2b were made before the rejection fix, when a full pool answered
@@ -1584,7 +1587,8 @@ Written down before each run.
 The blueprint's "Monitoring" lists Prometheus for metrics, Grafana for dashboards and Spring Boot
 Actuator for the application side, and names what to watch: request latency (p50/p95/p99), error
 rates, JVM, thread pools and Kafka consumer lag. This part builds that locally. Tracing
-(OpenTelemetry) and structured logs come next (see Roadmap).
+(OpenTelemetry) is [part 2](#observability-part-2-tracing-opentelemetry--jaeger); structured logs
+come next (see Roadmap).
 
 ### What was built
 
@@ -1682,8 +1686,196 @@ runs: the `@WebMvcTest` controller tests of both services (`AlbTestSecurityConfi
 /actuator/prometheus` without a token is neither `401` nor `403` (the web slice has no Actuator, so
 the request ends after security), and `GET /actuator/env` without a token is a `401` Problem Details.
 Removing the path from `permitAll` makes the first test fail with `401`, checked once by hand.
-Not a `@SpringBootTest`: Boot's test support turns metrics export off there by default, and an extra
-annotation would start a second context with its own MySQL, Kafka and SeaweedFS containers.
+Not a `@SpringBootTest`: an extra annotation would start a second context with its own MySQL, Kafka
+and SeaweedFS containers. (This section first also said that Boot's test support turns metrics export
+off in a `@SpringBootTest`. Part 2 found that in Boot 4 such test defaults live in separate test
+starters, and the metrics one is not on the classpath, so that reason is unverified.)
+
+## Observability, part 2: tracing (OpenTelemetry + Jaeger)
+
+The blueprint's "Request Tracing": OpenTelemetry creates a trace when a request enters a service,
+the trace context travels in HTTP headers to the next service and in Kafka headers to the consumer
+(its example headers: `traceparent`, `submissionId`, `loanId`), and every service adds its own spans
+to the same trace. This part builds that for the HTTP calls and both Kafka hops. Every number below
+comes from my own runs on 2026-11-25 (services started with `mvn spring-boot:run`, so latencies are
+not comparable with the load-test tables).
+
+### What was built
+
+- **Boot 4's own starter** `spring-boot-starter-opentelemetry` in settlement-service, wire-service and
+  notification-service: the OpenTelemetry SDK, the Micrometer Tracing bridge (every Micrometer
+  observation that Spring already makes becomes a span) and the OTLP exporter. Spans are **pushed**
+  over OTLP/HTTP to `management.opentelemetry.tracing.export.otlp.endpoint`
+  (`http://localhost:4318/v1/traces`; Boot 4.1 has no default). The service name in Jaeger is
+  `spring.application.name`.
+- **Metrics stay pulled.** The starter also brings Micrometer's OTLP *metrics* registry, which is on by
+  default and would push metrics to `localhost:4318` every minute, Jaeger's port. Prometheus already
+  pulls them, so `management.otlp.metrics.export.enabled: false`.
+- **Sampling 1.0 locally** (`management.tracing.sampling.probability`; Boot's default is 0.1, which
+  would leave 9 of 10 test requests without a trace). A real deployment would sample less.
+- **Jaeger v2** (`cr.jaegertracing.io/jaegertracing/jaeger:2.23.0`), profile `observability` like
+  Prometheus and Grafana, in-memory storage, UI on 16686, OTLP/HTTP on 4318. Jaeger v2 is one binary
+  built on the OpenTelemetry Collector; `jaegertracing/all-in-one` is the v1 image, end of life since
+  31 Dec 2025.
+- **Where the trace context crosses a boundary, and what carries it:**
+
+| Boundary | How the context travels | Change needed |
+|---|---|---|
+| wire-service → settlement-service (HTTP) | `traceparent` header | none: the WebClient was already built from Boot's `WebClient.Builder` (P1) |
+| settlement-service → loan-service (HTTP) | `traceparent` header | **G1:** `LoanServiceClient` now uses Boot's `RestClient.Builder` (`spring-boot-starter-restclient`) instead of the static `RestClient.builder()`, same request factory and 2 s / 5 s timeouts |
+| request thread → `loanImportExecutor` thread | snapshot at submit, restored in the worker | `ContextPropagatingTaskDecorator` on the pool |
+| wire-service → `email-delivery` → notification-service → `delivery-status` → wire-service (Kafka) | `traceparent` record header | **G2:** `spring.kafka.template.observation-enabled` and `spring.kafka.listener.observation-enabled` in both services |
+
+- **G3, the blueprint's Kafka headers:** both producers add `submissionId` and `loanId` as record
+  headers (`toRecord` in `EmailDeliveryPublisher` / `DeliveryStatusPublisher`). They are for tools that
+  read headers only (console consumer, a broker UI); no consumer reads them, so the payload stays the
+  one contract.
+- **Dead-letter templates are not observed.** They are built by hand inside the error handlers (a
+  second `KafkaTemplate` bean would make Boot back off from its own), so publishing to a DLQ makes no
+  span. The dead-letter recoverer copies the original record's headers, so a DLQ record is expected to
+  keep the original `traceparent`; that is not verified yet (see Known limitations).
+- **Less noise.** Without filtering, Prometheus's scrape every 5 s produced 5 traces per service per
+  30 s, and Spring Security added 4-7 spans to every request:
+  - an `ObservationPredicate` (`config/ObservationConfig`, one copy per service) drops every
+    observation for `/actuator` requests. It checks twice: the server observation itself, and any
+    observation made while the current thread serves an `/actuator` request (`RequestContextHolder`,
+    filled by Boot's request-context filter before Spring Security runs). Dropping only the first one
+    would turn the authorization span inside a scrape into a trace of its own.
+  - `SecurityObservationSettings.withDefaults()` keeps Spring Security's authentication and
+    authorization spans (who was let in, and by which expression) and drops the filter-chain spans
+    (`security filterchain before/after`, `secured request`).
+  - Result: 5 scrape traces in 30 s → **0**, and **0** orphan traces; the trace of one
+    `POST /api/v1/wires` went from 13 to **9** spans.
+- **Log correlation came for free:** every log line now has a `[traceId-spanId]` column (Boot's default
+  correlation pattern once Micrometer Tracing is active). Structured JSON logs are part 3.
+
+### Try it
+
+```bash
+docker compose up -d jaeger                       # or: docker compose --profile observability up -d
+curl -s localhost:16686/api/v3/services           # {"services":["jaeger","settlement-service","wire-service",...]}
+```
+
+UI: http://localhost:16686 → Service `wire-service` → Find Traces. (`jaeger` in the list is Jaeger
+tracing its own API. The old `/api/services` path answers 404 in 2.23; the UI and `/api/v3` work.)
+
+One trace as JSON, filtered to service, traceId and span name (here: the last send of a wire):
+
+```bash
+curl -s -G localhost:16686/api/v3/traces \
+  --data-urlencode "query.service_name=wire-service" \
+  --data-urlencode "query.operation_name=http post /api/v1/wires/{submissionId}/send" \
+  --data-urlencode "query.start_time_min=$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ)" \
+  --data-urlencode "query.start_time_max=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  | grep -oE '"stringValue":"[a-z]+-service"|"traceId":"[0-9a-f]{8}|"name":"[^"]*"' | grep -v org.springframework.boot
+```
+
+(`date -v` is the macOS form; on Linux use `date -u -d '-120 seconds' ...`.)
+
+### Evidence
+
+**1. Wire generation, wire-service → settlement-service.** One trace, `976502d9…`, first request after
+a wire-service restart (17:20:30):
+
+| Span | Service | Duration | Parent |
+|---|---|---|---|
+| `http post /api/v1/wires` | wire | 547 ms | (root) |
+| └ `authorize method` (`hasRole('FinanceOps')`) | wire | 14 ms | |
+| └ `http get` (WebClient) | wire | 382 ms | |
+| &nbsp;&nbsp;└ `http get /api/v1/loans/{loanId}/settlements` | settlement | 53 ms | the WebClient span (remote parent) |
+| &nbsp;&nbsp;&nbsp;&nbsp;└ `authenticate bearertoken` → `JwtAuthenticationToken` | settlement | 19 ms | |
+| &nbsp;&nbsp;&nbsp;&nbsp;└ `get` (Redis, cache hit) | settlement | 5 ms | |
+
+The bearer token (service-to-service auth) and `traceparent` arrive together: settlement-service
+authenticated the token inside the same trace. No MySQL spans (JDBC is not instrumented) and no Mongo
+span (on a later cache miss, a Redis `set` followed the `get`, but the Mongo read in between had no span).
+
+**2. A gap with no span.** The client span is 382 ms, but settlement-service received the request only
+310 ms after it started. The same request, repeated:
+
+| Request | Gap before the request left wire-service | Whole POST | Explanation |
+|---|---|---|---|
+| 17:20:30, first after restart | 310 ms | 547 ms | token fetched from Keycloak + Netty DNS setup + cold JIT |
+| 17:24:31, 4 min later | 74 ms | 116 ms | token fetched **again** (see below) |
+| 17:27:37 | 7.3 ms | 93 ms | token reused; probably a new TCP connection after 3 idle minutes |
+| 17:27:42, 5 s later | **2.7 ms** | **25 ms** | everything warm |
+
+- The token fetch (`ServiceTokenFilter`) has no span: Spring Security's OAuth2 client uses its own HTTP
+  client, not Boot's builder. It shows up only as a hole in the client span.
+- Keycloak's tokens live 5 minutes, but Spring Security treats a token as expired **60 s early** (its
+  default clock skew), so it is reused for 4 minutes. 17:24:31 was 1 s past that point.
+- At 17:27:37 settlement-service's `authenticate bearertoken` took 53 ms instead of about 2 ms. Most
+  likely the same pattern on the other side (its cached copy of Keycloak's public keys was refreshed,
+  more than 5 minutes after the last fetch); not proven.
+
+**3. Import: the thread pool broke the trace.** Importing `LN-TRACE-01` before the task decorator gave
+two traces: the request (`91811c91…`) and, separately, the loan-service call (`5bc4a8c7…`). The trace
+context is a `ThreadLocal` of the request thread, and the call runs on a `loan-import-` thread. After
+`ContextPropagatingTaskDecorator`, a two-loan import was one trace (`16ea1d0d…`) with both
+`http get` spans. Each loan-service 404 shows as an `exception` event on its client span: `RestClient`
+throws `HttpClientErrorException.NotFound`, and `getLoan` turns it into `NOT_FOUND` afterwards.
+
+**4. Workflow 4, send → BlastMail → delivery-status → PWT.** One send of LN-1001 (20:29): 27 spans,
+all with traceId `5235146a…`:
+
+| Service | Spans |
+|---|---|
+| wire-service | `http post /api/v1/wires/{submissionId}/send`, `authorize request`, `authorize method`, 4 × `email-delivery send`, 4 × `delivery-status process` |
+| notification-service | 4 × `email-delivery process`, 8 × `set` (Redis), 4 × `delivery-status send` |
+
+The 8 Redis spans are the idempotency design (B3) seen from the outside: per recipient one
+`SET … NX` (claim) and one `SET` to `SENT`, no `GET`. The S3 download and SMTP have no spans. One
+`email-delivery` record, from the console consumer (`--property print.headers=true`):
+
+```
+submissionId:SUB-40fb7208-…,loanId:LN-1001,traceparent:00-5235146afa719aaadf7f2c53ade13202-69a8942accc6b9d4-03   {"eventId":"EVT-…", ...}
+```
+
+The traceId in the record header is the traceId in Jaeger. The last field, `03`, is the trace-flags
+bit field: `01` sampled plus `02` random trace-id (W3C Trace Context Level 2).
+
+### What went wrong on the way
+
+- **Tests tried to export spans.** The first build logged `Failed to export spans ... localhost:4318`
+  in a notification-service `@SpringBootTest`. Boot 4 keeps the "no reporting tracing components in
+  `@SpringBootTest`" default in a test module, so each service now has
+  `spring-boot-starter-opentelemetry-test` (1 → 0 such lines in the notification-service build).
+- **`management.tracing.export.enabled=false` switches tracing off completely**, not only the sending:
+  with it the G1 test got no `traceparent` at all, and the log correlation column disappeared. The test
+  uses `@AutoConfigureTracing` with only `management.tracing.export.otlp.enabled=false`.
+- **My first regex for `traceparent` expected flags `00` or `01`**; OpenTelemetry sends `03` (above).
+- **Kafka consumer spans are called `process`,** not `receive` (OpenTelemetry's messaging naming).
+
+### Tests
+
+- `LoanServiceCircuitBreakerTest.clientFromSpringSendsW3cTraceContext` (G1): the Spring-built client
+  sends a W3C `traceparent` to the fake loan-service. Written first: it failed (`null`) with the static
+  builder, then passed after the change. `@AutoConfigureTracing` is free here, because the class's
+  `@DynamicPropertySource` already gives it its own context.
+- `EmailDeliveryPublisherTest`, `DeliveryStatusPublisherTest` (G3): topic, key = `submissionId`, value,
+  and both headers, with the header names written out (not the constants) so a rename fails the test.
+- Not built: an automated test that `traceparent` and `Authorization` reach settlement-service together
+  (G5). The live trace above shows it, the G1 test covers the rule that matters (the client must come
+  from Boot's builder), and a wire-service test would need a new Spring context with its own containers.
+
+### Predictions vs measurements
+
+| Check | Predicted | Measured |
+|---|---|---|
+| PWT → LSC | one trace, settlement span a child of the WebClient span | yes (remote parent) |
+| PWT → LSC | no span for the Keycloak token call | none; visible only as a 310 ms gap |
+| Second request within 5 min | gap of a few ms | **74 ms**: 60 s clock skew, token fetched again; 2.7 ms once really reused |
+| Import before the decorator | loan-service call in a separate trace | yes (`91811c91…` / `5bc4a8c7…`) |
+| Import after the decorator | one trace | yes, both calls of a 2-loan import |
+| Noise filter | 0 scrape traces, no orphans; 13 → 9 spans per POST | 0, 0, 9 |
+| Workflow 4 | one trace over both Kafka hops, 4 branches, no S3/SMTP/MySQL spans | 27 spans, one traceId; consumer spans named `process`, not `receive` |
+| G1 test with `export.enabled=false` | header present | **wrong**: no tracer at all (no header) |
+
+### Caveats
+
+- 100% sampling and local runs only; tracing adds work per request (span creation, export batches).
+  The load-test numbers in the sections above were measured without tracing and were not re-measured.
+- Durations are from single requests, not from a load test.
 
 ## What works so far
 
@@ -1765,6 +1957,10 @@ annotation would start a second context with its own MySQL, Kafka and SeaweedFS 
       notification-service, latency histograms, Prometheus (5 s pull) and Grafana provisioned from git
       (profile `observability`) with a 16-panel dashboard; verified with an import outage that the
       error rate does not show and the breaker panels do
+- [x] Observability, part 2: OpenTelemetry tracing (Boot 4 starter, OTLP to Jaeger v2) across HTTP
+      (wire → settlement → loan-service), the import thread pool and both Kafka hops, with the
+      blueprint's `submissionId` / `loanId` Kafka headers; scrape and Spring Security filter-chain noise
+      removed; verified with one 27-span trace for a whole send (Workflow 4)
 
 ## Roadmap
 
@@ -1783,8 +1979,8 @@ annotation would start a second context with its own MySQL, Kafka and SeaweedFS 
 - [ ] Timeouts under load: S3 upload and Kafka producer on the send path (needs many unique
       `CLOSED` loans or seeded drafts, because each loan can be sent only once)
 - [x] Observability, part 1: metrics (Prometheus, Grafana, dashboard)
-- [ ] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka (next)
-- [ ] Observability, part 3: structured JSON logs with trace IDs and business fields (ELK optional)
+- [x] Observability, part 2: tracing with OpenTelemetry across HTTP and Kafka
+- [ ] Observability, part 3: structured JSON logs with trace IDs and business fields (ELK optional) (next)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
 - [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
@@ -1913,8 +2109,25 @@ annotation would start a second context with its own MySQL, Kafka and SeaweedFS 
 - Percentiles on the dashboard are estimates within a histogram bucket, not exact values
 - No alerting rules yet: the dashboard shows problems, nothing notifies anyone (the blueprint uses
   CloudWatch for alerting)
-- settlement-service builds its loan-service client with the static `RestClient.builder()`, so that call
-  has no `http.client.requests` metrics (the breaker's call timer is used instead)
 - loan-service is not scraped (it is a mock of another team's system and has no Actuator)
 - The 5 s scrape interval is a local choice for short load-test runs; 15-30 s is more usual, because
   every scrape costs storage
+- Tracing samples 100% locally; a real deployment would sample less. The load-test numbers above were
+  measured before tracing and not re-measured with it
+- Not traced, so only visible as gaps in a trace: MySQL (JDBC), MongoDB, S3 upload/download, SMTP,
+  wire-service's token fetch from Keycloak and settlement-service's fetch of Keycloak's public keys
+- loan-service has no tracing (mock): settlement-service's client span is the last hop
+- A business 404 from loan-service is recorded as an `exception` on the client span, so `NOT_FOUND`
+  imports look like errors in Jaeger
+- Log lines written on Reactor threads (e.g. `boundedElastic`, where wire-service fetches its token)
+  have no traceId: the trace context is not carried onto Reactor threads (part 3)
+- `/actuator` requests produce neither spans nor `http.server.requests` metrics any more (one
+  predicate drops the observation, and metrics and spans come from it); the dashboard excluded them
+  anyway
+- Dead-letter publishing has no span, and that a DLQ record keeps the original `traceparent` is
+  expected (the recoverer copies headers) but not verified
+- The Kafka headers `submissionId` / `loanId` are informational copies of payload fields; nothing
+  checks that they match the payload
+- Jaeger keeps traces in memory: a restart or `docker compose down` deletes them
+- wire-service reuses a service token for 4 of its 5 minutes (Spring Security's 60 s clock skew); the
+  first call after that pays the token fetch (about 74 ms warm, more when cold)

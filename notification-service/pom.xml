@@ -33,6 +33,14 @@
             <artifactId>spring-boot-starter-webmvc</artifactId>
         </dependency>
 
+        <!-- O2: Boot 4 keeps the test default "no span export in @SpringBootTest" in this test starter.
+     Without it, test contexts tried to send spans to localhost:4318 (seen in the build log). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!-- Consume email-delivery, publish delivery-status (also brings Boot's JsonMapper via Jackson 3) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -65,6 +73,13 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
+        </dependency>
+
+        <!-- O2: distributed tracing. Boot 4's own OpenTelemetry starter: OpenTelemetry SDK + Micrometer
+     Tracing bridge + OTLP exporter (traces pushed to Jaeger). Version managed by Boot. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-opentelemetry</artifactId>
         </dependency>
 
         <!-- @Validated on StorageProperties: fail at startup if storage settings are missing -->
