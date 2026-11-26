@@ -751,7 +751,11 @@ so it can be inspected and replayed.
 Each service declares the topics it produces to, so every topic has one owner that sets its
 partitions and retention. Producers use `acks=all` with idempotence enabled. Replication factor
 is a setting (`topics.replication-factor`): 1 on the single local broker, 3 or more in a real
-cluster. A dead-letter record goes to the same partition number as the original, which is why the
+cluster. `acks=all` only waits for the replicas that are currently in sync, so every topic also sets
+`min.insync.replicas` (`topics.min-insync-replicas`): 1 locally, 2 with replication factor 3. A
+write is then acknowledged only once two copies have it, and with fewer in sync the producer gets
+an error instead of a false success. KafkaAdmin applies it when it creates a topic; a topic that
+already exists keeps its old config. A dead-letter record goes to the same partition number as the original, which is why the
 DLQs have 6 partitions too.
 
 `delivery-status` on the local broker, before notification-service existed (auto-created by the
