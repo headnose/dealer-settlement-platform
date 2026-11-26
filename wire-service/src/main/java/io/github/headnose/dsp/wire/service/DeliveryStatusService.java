@@ -64,6 +64,11 @@ public class DeliveryStatusService {
             if (updated == 0) {
                 log.warn("All recipients SENT but submission {} was not QUEUED; status left unchanged",
                         event.submissionId());
+            } else {
+                // O3: the blueprint's example log line, once per wire (only the event that wins the conditional
+                // update gets here). submissionId / loanId come from the MDC (DeliveryStatusListener), next to
+                // the traceId that started at the send request.
+                log.info("Wire submission status updated to SENT");
             }
         }
     }
