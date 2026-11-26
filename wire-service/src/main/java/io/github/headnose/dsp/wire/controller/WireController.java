@@ -4,9 +4,11 @@ import io.github.headnose.dsp.wire.controller.dto.SubmissionStatusDto;
 import io.github.headnose.dsp.wire.controller.dto.WireGenerationRequestDto;
 import io.github.headnose.dsp.wire.controller.dto.WireSubmissionDto;
 import io.github.headnose.dsp.wire.entity.WireSubmission;
+import io.github.headnose.dsp.wire.logging.MdcKeys;
 import io.github.headnose.dsp.wire.service.WireGenerationService;
 import io.github.headnose.dsp.wire.service.WireSendService;
 import jakarta.validation.Valid;
+import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,19 +33,23 @@ public class WireController {
     /**
      * Generate Wire Statement (blueprint: POST /api/v1/wires). Creates a DRAFT submission.
      * Maker side of maker-checker: Finance Operations prepares the wire.
+     * O3: loanId is in the body, not the path, so it is put into the MDC here (the interceptor cannot see it).
      */
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     @PreAuthorize("hasRole('FinanceOps')")
     public WireSubmissionDto generate(@Valid @RequestBody WireGenerationRequestDto request) {
-        WireSubmission submission = wireGenerationService.generate(request);
-        return WireSubmissionDto.from(submission);
+        try (MDC.MDCCloseable ignored = MDC.putCloseable(MdcKeys.LOAN_ID, request.loanId())) {
+            WireSubmission submission = wireGenerationService.generate(request);
+            return WireSubmissionDto.from(submission);
+        }
     }
 
     /**
      * Send Wire Statement (blueprint: POST /api/v1/wires/{submissionId}/send).
      * 202 Accepted (D11): the request is accepted and the emails go out asynchronously.
      * Checker side of maker-checker: only a SettlementAdmin releases the wire to the dealer's bank.
+     * O3: submissionId comes into the MDC from the path (PathIdMdcInterceptor).
      */
     @PostMapping("/{submissionId}/send")
     @ResponseStatus(HttpStatus.ACCEPTED)

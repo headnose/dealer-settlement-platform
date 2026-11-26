@@ -5,10 +5,12 @@ import io.github.headnose.dsp.settlement.client.LoanServiceClient;
 import io.github.headnose.dsp.settlement.client.LoanServiceUnavailableException;
 import io.github.headnose.dsp.settlement.client.dto.LoanDto;
 import io.github.headnose.dsp.settlement.document.LoanSettlementDocument;
+import io.github.headnose.dsp.settlement.logging.MdcKeys;
 import io.github.headnose.dsp.settlement.model.LoanStatus;
 import io.github.headnose.dsp.settlement.repository.LoanSettlementRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
@@ -81,8 +83,18 @@ public class LoanImportService {
                 .toList();
     }
 
-    /** Imports a single loan. Runs on a loan-import thread. Never throws for business cases. */
+    /**
+     * Imports a single loan. Runs on a loan-import thread. Never throws for business cases.
+     * O3: one request imports several loans, so loanId is set per task, not per request: every log line of
+     * this loan's import (incl. the loan-service client and its fallback) carries it. Removed when done.
+     */
     ImportResult importOne(String loanId) {
+        try (MDC.MDCCloseable ignored = MDC.putCloseable(MdcKeys.LOAN_ID, loanId)) {
+            return importLoan(loanId);
+        }
+    }
+
+    private ImportResult importLoan(String loanId) {
         // Rule 1: already imported? (cheap local check, avoids a network call)
         if (repository.existsById(loanId)) {
             return new ImportResult(loanId, ImportOutcome.ALREADY_IMPORTED,
@@ -120,7 +132,10 @@ public class LoanImportService {
     private ImportResult unexpectedFailure(String loanId, Throwable ex) {
         // supplyAsync wraps the real exception in a CompletionException
         Throwable cause = (ex instanceof CompletionException && ex.getCause() != null) ? ex.getCause() : ex;
-        log.error("Import of loan {} failed unexpectedly", loanId, cause);
+        // O3: importOne has already removed its loanId by now
+        try (MDC.MDCCloseable ignored = MDC.putCloseable(MdcKeys.LOAN_ID, loanId)) {
+            log.error("Import of loan {} failed unexpectedly", loanId, cause);
+        }
         return new ImportResult(loanId, ImportOutcome.FAILED, FAILED_MESSAGE);
     }
 }
