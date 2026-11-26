@@ -2,6 +2,7 @@ package io.github.headnose.dsp.wire.config;
 
 import io.github.headnose.dsp.wire.security.AlbHeaderAuthenticationFilter;
 import io.github.headnose.dsp.wire.security.AlbSecurityProperties;
+import io.github.headnose.dsp.wire.security.UserMdcFilter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,6 +12,7 @@ import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
 import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
@@ -46,6 +48,8 @@ public class SecurityConfig {
                 // Every request carries its own identity (ALB headers / bearer token): no HTTP session.
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .addFilterAt(albFilter, AbstractPreAuthenticatedProcessingFilter.class)
+                // O3: userId into the MDC once the user is authenticated, before the 403 decision.
+                .addFilterBefore(new UserMdcFilter(), AuthorizationFilter.class)
                 // 401/403 go through GlobalExceptionHandler, so they are ProblemDetail like every other error.
                 .exceptionHandling(exceptions -> exceptions
                         .authenticationEntryPoint((request, response, e) ->

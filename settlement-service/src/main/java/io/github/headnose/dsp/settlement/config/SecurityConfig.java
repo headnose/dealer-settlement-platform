@@ -2,6 +2,7 @@ package io.github.headnose.dsp.settlement.config;
 
 import io.github.headnose.dsp.settlement.security.AlbHeaderAuthenticationFilter;
 import io.github.headnose.dsp.settlement.security.AlbSecurityProperties;
+import io.github.headnose.dsp.settlement.security.UserMdcFilter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -14,6 +15,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.web.AuthenticationEntryPoint;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.access.AccessDeniedHandler;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.preauth.AbstractPreAuthenticatedProcessingFilter;
 import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationProvider;
 import org.springframework.security.web.context.RequestAttributeSecurityContextRepository;
@@ -56,6 +58,8 @@ public class SecurityConfig {
                 // Every request carries its own identity (ALB headers / bearer token): no HTTP session.
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .addFilterAt(albFilter, AbstractPreAuthenticatedProcessingFilter.class)
+                // O3: userId into the MDC once both authentication filters have run, before the 403 decision.
+                .addFilterBefore(new UserMdcFilter(), AuthorizationFilter.class)
                 // Step 5: service tokens (scope claim -> SCOPE_* authorities). Without these two handlers a bad
                 // Bearer token would get Spring's own empty 401, not our ProblemDetail.
                 .oauth2ResourceServer(oauth2 -> oauth2
