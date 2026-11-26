@@ -167,3 +167,11 @@ logging:
   structured:
     format:
       file: ecs
+
+# Blueprint "Support / Retry Job": sends dead-lettered events back to their topic after a delay
+# (DeadLetterRedriveJob). Only retryable failures; after max-redrives rounds the event is parked
+# (stays in the DLQ, WARN line) for the manual replay. Starting values.
+dlq-redrive:
+  enabled: true
+  delay: 5m          # long enough for a database or broker blip to be over
+  max-redrives: 3
