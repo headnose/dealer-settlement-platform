@@ -141,6 +141,10 @@ ADMIN=$(java dev-tools/AlbDevToken.java dev-admin SettlementAdmin 60)
 
 The tokens are local test credentials: do not paste them into websites that decode JWTs.
 
+loan-service has five hand-written sample loans (`LN-1001`, `LN-1002` and `LN-2001` are `CLOSED`,
+`LN-1003` is `ACTIVE`, `LN-2002` is `CANCELLED`) and 200 generated demo loans, `LN-5001` to `LN-5200`,
+all `CLOSED`. Each loan can be sent only once, so use a fresh demo loan for every end-to-end run.
+
 ```bash
 # Fetch a sample loan from the mock upstream (no security: it stands in for another team's system)
 curl http://localhost:8081/api/v1/loans/LN-1001
@@ -2178,8 +2182,8 @@ alone would add a second source of truth next to the Problem Details `title`. No
 - [x] Dockerfiles and building the images in CI (build only; no registry yet)
 - [ ] Automated retry job for the dead-letter topics
 - [ ] Maybe: a short-lived AWS demo deployment
-- [ ] Small: more CLOSED sample loans (or a script to reset local demo data); every end-to-end run
-      uses one up, because each loan can be sent only once
+- [x] Small: more CLOSED sample loans: 200 demo loans `LN-5001` to `LN-5200` (every end-to-end run
+      uses one up, because each loan can be sent only once)
 
 ## Known limitations
 
