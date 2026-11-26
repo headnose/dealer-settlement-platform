@@ -133,7 +133,11 @@ docker compose --profile ui up -d ui
 
 - **Who you are:** paste the two tokens from `dev-tools/AlbDevToken.java` (FinanceOps, SettlementAdmin); the
   page remembers them in this browser. Locally there is no ALB, so the page sends the header it would add.
-- **1. Loans:** look a loan up in loan-service, import one or more, see each loan's outcome.
+- **1. Loans:** look a loan up in loan-service, import one or more (comma-separated IDs or a range such as
+  `LN-5010..5019`, one request, imported concurrently), see each loan's outcome.
+- **Batch:** the imported loans get checkboxes and three actions: calculate (with the adjustment rows from
+  section 2), generate wires, send. One request per loan, as in Workflow 2: the services have no batch
+  endpoints for these steps.
 - **2. Settlement:** edit the adjustment rows; the page shows the expected net (principal minus adjustments)
   before you calculate, and says whether the answer matches. "Show detail" adds the value date and the
   beneficiary bank.
