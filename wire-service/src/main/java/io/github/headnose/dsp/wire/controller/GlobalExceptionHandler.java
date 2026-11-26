@@ -9,6 +9,7 @@ import io.github.headnose.dsp.wire.service.DuplicateSubmissionException;
 import io.github.headnose.dsp.wire.service.SubmissionNotFoundException;
 import io.github.headnose.dsp.wire.service.SubmissionNotSendableException;
 import io.github.headnose.dsp.wire.storage.WireStatementStorageException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpHeaders;
@@ -80,7 +81,13 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(SettlementServiceUnavailableException.class)
     public ProblemDetail handleSettlementServiceUnavailable(SettlementServiceUnavailableException e) {
-        log.warn("settlement-service call failed: {}", e.getMessage(), e);
+        if (e.getCause() instanceof CallNotPermittedException) {
+            // Breaker open: settlement-service was not called. The opening was logged once by
+            // CircuitBreakerStateLogger; one WARN with a stack trace per rejected request added nothing.
+            log.debug("settlement-service circuit open: {}", e.getMessage());
+        } else {
+            log.warn("settlement-service call failed: {}", e.getMessage(), e);
+        }
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_GATEWAY,
                 "Could not get the settlement from settlement-service. Try again later.");
         problem.setTitle("Settlement service unavailable");
