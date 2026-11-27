@@ -22,6 +22,9 @@
         <!-- AWS SDK for Java v2: S3 client for wire statement attachments (wire-service uploads,
              notification-service downloads). Not managed by Spring Boot, so we import its BOM. -->
         <aws-sdk.version>2.57.3</aws-sdk.version>
+        <!-- OpenAPI docs + Swagger UI. springdoc 3.2.x is the line built for Spring Boot 4.1 (3.0.x is for
+             Boot 4.0, 2.x for Boot 3). Not managed by Spring Boot, so the version is pinned here. -->
+        <springdoc.version>3.2.1</springdoc.version>
     </properties>
 
     <modules>
@@ -40,6 +43,11 @@
                 <version>${aws-sdk.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

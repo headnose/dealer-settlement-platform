@@ -47,6 +47,11 @@
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
+		<!-- OpenAPI docs at /v3/api-docs and Swagger UI at /swagger-ui.html (version: parent pom). -->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+		</dependency>
 
 		<!-- Actuator: /actuator/health and /actuator/metrics (Hikari pool, server and repository
              timings for the load test). Exposure limited to health,metrics in application.yaml. -->
