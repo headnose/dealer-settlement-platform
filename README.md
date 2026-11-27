@@ -39,7 +39,7 @@ settlement-service call. See [Authentication and authorization](#authentication-
 Java 17 · Spring Boot 4 · Maven (multi-module) · MongoDB · MySQL · Flyway · Kafka · Redis ·
 Spring Security (OAuth2 resource server and client) · Keycloak ·
 Spring Mail · WebClient (Reactor Netty) · AWS SDK for Java v2 (S3) · SeaweedFS · Resilience4j ·
-Spring Boot Actuator + Micrometer · Prometheus · Grafana · OpenTelemetry · Jaeger · structured logging (ECS) · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
+springdoc-openapi (Swagger UI) · Spring Boot Actuator + Micrometer · Prometheus · Grafana · OpenTelemetry · Jaeger · structured logging (ECS) · Docker Compose · JUnit 6 · Mockito · Testcontainers · Awaitility ·
 GreenMail · k6 · Toxiproxy
 
 ## Running locally
@@ -147,6 +147,29 @@ docker compose --profile ui up -d ui
 
 It cannot show delivery status yet: wire-service has no endpoint to read a submission (see Known limitations).
 A real frontend (React, login through Keycloak instead of pasted tokens) is on the roadmap.
+
+### API docs (Swagger UI)
+
+Each service with an API serves its OpenAPI spec and a Swagger UI page, generated from the controllers by
+[springdoc-openapi](https://springdoc.org) (3.2.x, the line built for Spring Boot 4.1):
+
+| Service | Swagger UI | OpenAPI JSON |
+|---|---|---|
+| loan-service | http://localhost:8081/swagger-ui.html | http://localhost:8081/v3/api-docs |
+| settlement-service | http://localhost:8082/swagger-ui.html | http://localhost:8082/v3/api-docs |
+| wire-service | http://localhost:8083/swagger-ui.html | http://localhost:8083/v3/api-docs |
+
+- **Authorize:** the API endpoints still need a token. Click **Authorize** and paste a token from
+  `dev-tools/AlbDevToken.java` into `albClaims` (FinanceOps to import, calculate and generate a wire;
+  SettlementAdmin to send it). settlement-service also lists `serviceToken`, the Bearer token wire-service
+  gets from Keycloak.
+- **Security:** only the docs paths (`/v3/api-docs/**`, `/swagger-ui/**`) are open without a token. The page
+  and the spec describe the API but hold no data, and a browser cannot add the ALB header itself. Every
+  other path keeps its rule (`ApiDocsSecurityTest` checks both).
+- **In AWS:** a public API description helps an attacker map the API, so turn it off there with
+  `SPRINGDOC_APIDOCS_ENABLED=false` and `SPRINGDOC_SWAGGERUI_ENABLED=false`, or serve it only on an internal
+  network.
+- notification-service has no HTTP API (it only consumes Kafka), so it has no docs page.
 
 ### Try it
 

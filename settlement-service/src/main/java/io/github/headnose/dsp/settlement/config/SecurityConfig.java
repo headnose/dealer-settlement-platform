@@ -77,6 +77,12 @@ public class SecurityConfig {
                                 "/actuator/prometheus").permitAll()
                         // Boot's error page must not turn a real error into a 401/403.
                         .requestMatchers("/error").permitAll()
+                        // API docs (springdoc): the page and the spec itself carry no data, and a browser
+                        // cannot send the ALB header to load them. The endpoints they describe stay protected:
+                        // "Try it out" needs a token pasted under Authorize. In AWS, turn the docs off with
+                        // SPRINGDOC_APIDOCS_ENABLED=false and SPRINGDOC_SWAGGERUI_ENABLED=false.
+                        .requestMatchers("/v3/api-docs", "/v3/api-docs/**", "/swagger-ui.html",
+                                "/swagger-ui/**").permitAll()
                         .requestMatchers("/api/v1/**").authenticated()
                         // Anything not listed (new endpoints, other actuator paths) is denied until listed.
                         .anyRequest().denyAll());
